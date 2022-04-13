@@ -105,12 +105,27 @@ def parse_literal(alist, type_dict, predicate_dict, negated=False):
         alist = alist[1]
         negated = not negated
 
+    # pred_id, arity = _get_predicate_id_and_arity(
+    #     alist[0], type_dict, predicate_dict)
+    #
+    # if arity != len(alist) - 1:
+    #     raise SystemExit("predicate used with wrong arity: (%s)"
+    #                      % " ".join(alist))
+
     pred_id, arity = _get_predicate_id_and_arity(
         alist[0], type_dict, predicate_dict)
 
     if arity != len(alist) - 1:
         raise SystemExit("predicate used with wrong arity: (%s)"
                          % " ".join(alist))
+
+    text = alist[0]
+    the_type = type_dict.get(text)
+    # the_predicate = predicate_dict.get(text)
+    if the_type is not None:
+        pred_id = the_type.get_predicate_name()
+    else:
+        pred_id = text
 
     if negated:
         return pddl.NegatedAtom(pred_id, alist[1:])
