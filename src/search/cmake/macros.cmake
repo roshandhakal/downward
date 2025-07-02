@@ -52,11 +52,11 @@ function(add_existing_sources_to_list _SOURCES_LIST_VAR)
 endfunction()
 
 function(create_fast_downward_library)
-    set(_OPTIONS DEPENDENCY_ONLY CORE_LIBRARY)
+    set(_OPTIONS DEPENDENCY_ONLY CORE_LIBRARY REAL_LIBRARY)
     set(_ONE_VALUE_ARGS NAME HELP)
     set(_MULTI_VALUE_ARGS SOURCES DEPENDS)
     cmake_parse_arguments(_LIBRARY "${_OPTIONS}" "${_ONE_VALUE_ARGS}" "${_MULTI_VALUE_ARGS}" ${ARGN})
-    # Check mandatory arguments.
+
     if(NOT _LIBRARY_NAME)
         message(FATAL_ERROR "fast_downward_library: 'NAME' argument required.")
     endif()
@@ -66,26 +66,34 @@ function(create_fast_downward_library)
 
     add_existing_sources_to_list(_LIBRARY_SOURCES)
 
-    if (NOT _LIBRARY_CORE_LIBRARY AND NOT _LIBRARY_DEPENDENCY_ONLY)
-        # Decide whether the library should be enabled by default.
+    if(NOT _LIBRARY_CORE_LIBRARY AND NOT _LIBRARY_DEPENDENCY_ONLY)
         if (DISABLE_LIBRARIES_BY_DEFAULT)
             set(_OPTION_DEFAULT FALSE)
         else()
             set(_OPTION_DEFAULT TRUE)
         endif()
         string(TOUPPER ${_LIBRARY_NAME} _LIBRARY_NAME_UPPER)
-        option(LIBRARY_${_LIBRARY_NAME_UPPER}_ENABLED ${_LIBRARY_HELP} ${_OPTION_DEFAULT})
+        option(LIBRARY_${_LIBRARY_NAME_UPPER}_ENABLED "${_LIBRARY_HELP}" ${_OPTION_DEFAULT})
     endif()
 
-    add_library(${_LIBRARY_NAME} INTERFACE)
-    target_link_libraries(${_LIBRARY_NAME} INTERFACE common_cxx_flags)
-    target_sources(${_LIBRARY_NAME} INTERFACE ${_LIBRARY_SOURCES})
-    target_link_libraries(${_LIBRARY_NAME} INTERFACE ${_LIBRARY_DEPENDS})
+    # NEW: If REAL_LIBRARY is requested, create a STATIC library
+    if (_LIBRARY_REAL_LIBRARY)
+        add_library(${_LIBRARY_NAME} STATIC ${_LIBRARY_SOURCES})
+        target_link_libraries(${_LIBRARY_NAME} PRIVATE common_cxx_flags)
+        target_link_libraries(${_LIBRARY_NAME} PRIVATE ${_LIBRARY_DEPENDS})
+    else()
+        add_library(${_LIBRARY_NAME} INTERFACE)
+        target_link_libraries(${_LIBRARY_NAME} INTERFACE common_cxx_flags)
+        target_sources(${_LIBRARY_NAME} INTERFACE ${_LIBRARY_SOURCES})
+        target_link_libraries(${_LIBRARY_NAME} INTERFACE ${_LIBRARY_DEPENDS})
+    endif()
 
     if (_LIBRARY_CORE_LIBRARY OR LIBRARY_${_LIBRARY_NAME_UPPER}_ENABLED)
         target_link_libraries(downward PUBLIC ${_LIBRARY_NAME})
     endif()
 endfunction()
+
+
 
 function(copy_dlls_to_binary_dir_after_build _TARGET_NAME)
     # Once we require CMake version >=3.21, we can use the code below instead.

@@ -46,6 +46,9 @@ set_up_options()
 project(downward LANGUAGES CXX)
 add_executable(downward planner.cc)
 
+project(downward LANGUAGES CXX)
+find_package(pybind11 REQUIRED)  # <-- Add this line here
+
 # On Windows we have to copy all DLLs next to the generated binary.
 if (WIN32)
     copy_dlls_to_binary_dir_after_build(downward)
@@ -670,6 +673,19 @@ create_fast_downward_library(
         priority_queues
         task_properties
 )
+
+
+create_fast_downward_library(
+    NAME antplan_heuristic
+    HELP "Anticipatory heuristic calling a Python model"
+    SOURCES
+        heuristics/antplan_heuristic
+    DEPENDS
+        priority_queues
+        task_properties
+    REAL_LIBRARY
+)
+target_link_libraries(antplan_heuristic PRIVATE pybind11::embed)
 
 create_fast_downward_library(
     NAME max_heuristic
