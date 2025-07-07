@@ -24,7 +24,7 @@ void AntPlanHeuristic::ensure_python_ready() {
     py::initialize_interpreter();
 
     py::module sys = py::module::import("sys");
-    sys.attr("path").attr("insert")(0, "./python");
+    sys.attr("path").attr("insert")(0, "./models");
 
     try {
         py::module mdl = py::module::import("antplan_model");
