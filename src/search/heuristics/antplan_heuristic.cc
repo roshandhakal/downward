@@ -97,11 +97,11 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
     // }
 
     // Print symbolic state
-    cerr << "ANTPLAN: Symbolic State = {" << endl;
-    for (const auto &pair : state_map) {
-        cerr << "  " << pair.first << ": " << pair.second << endl;
-    }
-    cerr << "}" << endl;
+    // cerr << "ANTPLAN: Symbolic State = {" << endl;
+    // for (const auto &pair : state_map) {
+    //     cerr << "  " << pair.first << ": " << pair.second << endl;
+    // }
+    // cerr << "}" << endl;
 
     // Pass symbolic state to Python as a dictionary
     try {
