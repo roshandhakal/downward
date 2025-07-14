@@ -62,11 +62,15 @@ void AntPlanHeuristic::enqueue_if_necessary(PropID prop_id, int cost) {
 int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
     State state = convert_ancestor_state(ancestor_state);
 
-    // --- Phase 1: Relaxed exploration (same as hmax) ---
+    // Phase 1: Relaxed exploration (like hmax)
     setup_exploration_queue();
     setup_exploration_queue_state(state);
 
+    int best_combined_cost = std::numeric_limits<int>::max();
     int unsolved_goals = goal_propositions.size();
+
+    cerr << "[ANTPLAN] Starting relaxed exploration from current state..." << endl;
+
     while (!queue.empty()) {
         pair<int, PropID> top_pair = queue.pop();
         int distance = top_pair.first;
@@ -76,14 +80,42 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
         if (prop->cost < distance)
             continue;
 
-        // DEBUG: Print proposition ID and cost
-        cerr << "[ANTPLAN] Exploring prop_id=" << prop_id
-             << " with relaxed cost=" << prop->cost << endl;
-
-        if (prop->is_goal && --unsolved_goals == 0) {
-            break;
+        // --- Build symbolic snapshot for this relaxed state ---
+        std::map<std::string, std::string> state_map;
+        for (VariableProxy var : task_proxy.get_variables()) {
+            FactProxy fact = state[var];
+            state_map[var.get_name()] = fact.get_name();
         }
 
+        // DEBUG: Print the symbolic snapshot being evaluated
+        cerr << "[ANTPLAN] Evaluating relaxed state (distance=" << distance << "):" << endl;
+        for (const auto &p : state_map) {
+            cerr << "    " << p.first << " -> " << p.second << endl;
+        }
+
+        // Phase 2: Compute anticipatory cost for this state
+        int ant_cost = 0;
+        try {
+            ant_cost = py_cost_fn(py::cast(state_map)).cast<int>();
+        } catch (const py::error_already_set &e) {
+            cerr << "ANTPLAN: Python error in anticipatory cost:\n" << e.what() << endl;
+            return DEAD_END;
+        }
+
+        int combined_cost = distance + ant_cost;
+        cerr << "[ANTPLAN] Combined cost for this state = " << distance
+             << " (distance) + " << ant_cost << " (anticipatory) = "
+             << combined_cost << endl;
+
+        if (combined_cost < best_combined_cost) {
+            best_combined_cost = combined_cost;
+        }
+
+        if (prop->is_goal && --unsolved_goals == 0) {
+            cerr << "[ANTPLAN] All goals reached during relaxed exploration." << endl;
+        }
+
+        // Expand successors (like hmax)
         for (OpID op_id : precondition_of_pool.get_slice(
                  prop->precondition_of, prop->num_precondition_occurences)) {
             UnaryOperator *unary_op = get_operator(op_id);
@@ -94,46 +126,13 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
         }
     }
 
-    // --- Phase 2: Compute symbolic relaxed cost (max over goals) ---
-    int sym_cost = 0;
-    for (PropID goal_id : goal_propositions) {
-        const Proposition *goal = get_proposition(goal_id);
-        if (goal->cost == -1) {
-            return DEAD_END;
-        }
-        sym_cost = max(sym_cost, goal->cost);
-    }
-
-    // --- Phase 3: Build state map for Python anticipatory cost ---
-    std::map<std::string, std::string> state_map;
-    for (VariableProxy var : task_proxy.get_variables()) {
-        FactProxy fact = state[var];
-        state_map[var.get_name()] = fact.get_name();
-    }
-
-    // DEBUG: Print symbolic snapshot
-    cerr << "[ANTPLAN] Current symbolic state:" << endl;
-    for (const auto &p : state_map) {
-        cerr << "  " << p.first << " -> " << p.second << endl;
-    }
-
-    // --- Phase 4: Call Python anticipatory function ---
-    int ant_cost = 0;
-    try {
-        ant_cost = py_cost_fn(py::cast(state_map)).cast<int>();
-    } catch (const py::error_already_set &e) {
-        cerr << "ANTPLAN: Python error in anticipatory cost:\n" << e.what() << endl;
+    if (best_combined_cost == std::numeric_limits<int>::max()) {
+        cerr << "[ANTPLAN] No reachable relaxed state found => DEAD END." << endl;
         return DEAD_END;
     }
 
-    int final_cost = sym_cost + ant_cost;
-
-    // DEBUG: Print heuristic breakdown
-    cerr << "[ANTPLAN] Heuristic result => sym_cost=" << sym_cost
-         << " + ant_cost=" << ant_cost
-         << " => final_cost=" << final_cost << endl;
-
-    return final_cost;
+    cerr << "[ANTPLAN] Final heuristic value = " << best_combined_cost << endl;
+    return best_combined_cost;
 }
 
 // --- Python function setup ---
