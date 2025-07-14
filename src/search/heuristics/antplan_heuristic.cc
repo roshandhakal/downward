@@ -49,10 +49,10 @@ void AntPlanHeuristic::ensure_python_ready() {
     sys.attr("path").attr("insert")(0, ".");
     py::list sys_path = sys.attr("path");
 
-    std::cerr << "Python sys.path:" << std::endl;
-    for (auto item : sys_path) {
-        std::cerr << "  " << std::string(py::str(item)) << std::endl;
-    }
+    // std::cerr << "Python sys.path:" << std::endl;
+    // for (auto item : sys_path) {
+    //     std::cerr << "  " << std::string(py::str(item)) << std::endl;
+    // }
 
     try {
         py::module mdl = py::module::import("antplan_model");
@@ -106,7 +106,7 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
     // Pass symbolic state to Python as a dictionary
     try {
         int cost = py_cost_fn(py::cast(state_map)).cast<int>();
-        // cerr << "ANTPLAN: → Python returned cost = " << cost << endl;
+        cerr << "ANTPLAN: → Python returned cost = " << cost << endl;
         return cost;
     } catch (const py::error_already_set &e) {
         cerr << "ANTPLAN: Python cost function threw an error:\n" << e.what() << endl;
