@@ -88,28 +88,49 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
         }
     }
 
-    int final_cost = -1;
+    // If any goal is unreachable, it's a dead end
     for (PropID goal_id : goal_propositions) {
         const Proposition *goal = get_proposition(goal_id);
-        int sym_cost = goal->cost;
-        if (sym_cost == -1)
+        if (goal->cost == -1)
             return DEAD_END;
-
-        std::map<std::string, std::string> state_map;
-        for (VariableProxy var : task_proxy.get_variables()) {
-            FactProxy fact = state[var];
-            state_map[var.get_name()] = fact.get_name();
-        }
-
-        try {
-            int ant_cost = py_cost_fn(py::cast(state_map)).cast<int>();
-            int combined = sym_cost + ant_cost;
-            final_cost = std::max(final_cost, combined);
-        } catch (const py::error_already_set &e) {
-            cerr << "ANTPLAN: Python error in symbolic evaluation:\n" << e.what() << endl;
-            return DEAD_END;
-        }
     }
+
+    // Compute symbolic cost like hmax
+    int symbolic_cost = 0;
+    for (PropID goal_id : goal_propositions) {
+        const Proposition *goal = get_proposition(goal_id);
+        symbolic_cost = max(symbolic_cost, goal->cost);
+    }
+
+    // Build relaxed state from all propositions with cost != -1
+    std::map<std::string, std::string> relaxed_state_map;
+    int idx = 0;
+    for (const Proposition &prop : propositions) {
+        if (prop.cost != -1) {
+            // Convert this proposition to its fact name using get_fact(idx)
+            FactPair fact_pair = get_fact(idx);
+            std::string fact_name = task_proxy.get_variables()[fact_pair.var]
+                                                 .get_fact(fact_pair.value)
+                                                 .get_name();
+            relaxed_state_map["p" + std::to_string(idx)] = fact_name;
+        }
+        idx++;
+    }
+
+    int anticipatory_cost = 0;
+    try {
+        anticipatory_cost = py_cost_fn(py::cast(relaxed_state_map)).cast<int>();
+    } catch (const py::error_already_set &e) {
+        cerr << "ANTPLAN: Python error in symbolic evaluation:\n" << e.what() << endl;
+        return DEAD_END;
+    }
+
+    int final_cost = symbolic_cost + anticipatory_cost;
+
+    cerr << "[ANTPLAN DEBUG] symbolic=" << symbolic_cost
+         << ", anticipatory=" << anticipatory_cost
+         << ", total=" << final_cost << endl;
+
     return final_cost;
 }
 
