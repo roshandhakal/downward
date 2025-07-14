@@ -64,7 +64,6 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
     setup_exploration_queue();
     setup_exploration_queue_state(state);
 
-    int best_combined_cost = -1;
     int unsolved_goals = goal_propositions.size();
 
     while (!queue.empty()) {
@@ -74,28 +73,6 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
         Proposition *prop = get_proposition(prop_id);
         int prop_cost = prop->cost;
         if (prop_cost < distance) continue;
-
-        std::map<std::string, std::string> state_map;
-        for (VariableProxy var : task_proxy.get_variables()) {
-            FactProxy fact = state[var];
-            state_map[var.get_name()] = fact.get_name();
-        }
-        // Log symbolic state
-        cerr << "[ANTPLAN] Symbolic state explored at cost: " << distance << endl;
-        for (const auto &pair : state_map) {
-            cerr << "  " << pair.first << ": " << pair.second << endl;
-        }
-        cerr << "---" << endl;
-        try {
-            int py_cost = py_cost_fn(py::cast(state_map)).cast<int>();
-            int combined_cost = distance + py_cost;
-            if (best_combined_cost == -1 || combined_cost < best_combined_cost) {
-                best_combined_cost = combined_cost;
-            }
-        } catch (const py::error_already_set &e) {
-            cerr << "ANTPLAN: Python error in symbolic evaluation:\n" << e.what() << endl;
-            return DEAD_END;
-        }
 
         if (prop->is_goal && --unsolved_goals == 0) {
             break;
@@ -111,7 +88,29 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
         }
     }
 
-    return (best_combined_cost == -1) ? DEAD_END : best_combined_cost;
+    int final_cost = -1;
+    for (PropID goal_id : goal_propositions) {
+        const Proposition *goal = get_proposition(goal_id);
+        int sym_cost = goal->cost;
+        if (sym_cost == -1)
+            return DEAD_END;
+
+        std::map<std::string, std::string> state_map;
+        for (VariableProxy var : task_proxy.get_variables()) {
+            FactProxy fact = state[var];
+            state_map[var.get_name()] = fact.get_name();
+        }
+
+        try {
+            int ant_cost = py_cost_fn(py::cast(state_map)).cast<int>();
+            int combined = sym_cost + ant_cost;
+            final_cost = std::max(final_cost, combined);
+        } catch (const py::error_already_set &e) {
+            cerr << "ANTPLAN: Python error in symbolic evaluation:\n" << e.what() << endl;
+            return DEAD_END;
+        }
+    }
+    return final_cost;
 }
 
 void AntPlanHeuristic::initialize_python_function(const std::string &func_name) {
