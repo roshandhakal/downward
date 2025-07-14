@@ -64,13 +64,9 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
     setup_exploration_queue();
     setup_exploration_queue_state(state);
 
-    std::map<std::string, std::string> state_map;
-    for (VariableProxy var : task_proxy.get_variables()) {
-        FactProxy fact = state[var];
-        state_map[var.get_name()] = fact.get_name();
-    }
+    int best_combined_cost = -1;
+    int unsolved_goals = goal_propositions.size();
 
-    int min_total_cost = std::numeric_limits<int>::max();
     while (!queue.empty()) {
         pair<int, PropID> top_pair = queue.pop();
         int distance = top_pair.first;
@@ -79,13 +75,25 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
         int prop_cost = prop->cost;
         if (prop_cost < distance) continue;
 
+        std::map<std::string, std::string> state_map;
+        for (VariableProxy var : task_proxy.get_variables()) {
+            FactProxy fact = state[var];
+            state_map[var.get_name()] = fact.get_name();
+        }
+
         try {
-            state_map["__last"] = to_string(prop_id);  // No fact*, so just pass ID
             int py_cost = py_cost_fn(py::cast(state_map)).cast<int>();
-            min_total_cost = min(min_total_cost, distance + py_cost);
+            int combined_cost = distance + py_cost;
+            if (best_combined_cost == -1 || combined_cost < best_combined_cost) {
+                best_combined_cost = combined_cost;
+            }
         } catch (const py::error_already_set &e) {
             cerr << "ANTPLAN: Python error in symbolic evaluation:\n" << e.what() << endl;
             return DEAD_END;
+        }
+
+        if (prop->is_goal && --unsolved_goals == 0) {
+            break;
         }
 
         for (OpID op_id : precondition_of_pool.get_slice(
@@ -98,7 +106,7 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
         }
     }
 
-    return (min_total_cost == std::numeric_limits<int>::max()) ? DEAD_END : min_total_cost;
+    return (best_combined_cost == -1) ? DEAD_END : best_combined_cost;
 }
 
 void AntPlanHeuristic::initialize_python_function(const std::string &func_name) {
