@@ -1,7 +1,6 @@
 // antplan_heuristic.cc (Anticipatory exploration heuristic inspired by hmax)
 
 #include "antplan_heuristic.h"
-
 #include "relaxation_heuristic.h"
 #include "../task_proxy.h"
 #include "../utils/logging.h"
@@ -10,14 +9,15 @@
 
 #include <pybind11/stl.h>
 #include <pybind11/embed.h>
-
 #include <limits>
+#include <iostream>
 
 using namespace std;
 namespace py = pybind11;
 
 namespace antplan_heuristic {
 
+// Python function handler
 py::object AntPlanHeuristic::py_cost_fn;
 bool AntPlanHeuristic::py_ready = false;
 std::string AntPlanHeuristic::py_func_name = "anticipatory_cost_fn";
@@ -61,18 +61,24 @@ void AntPlanHeuristic::enqueue_if_necessary(PropID prop_id, int cost) {
 
 int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
     State state = convert_ancestor_state(ancestor_state);
+
+    // --- Phase 1: Relaxed exploration (same as hmax) ---
     setup_exploration_queue();
     setup_exploration_queue_state(state);
 
     int unsolved_goals = goal_propositions.size();
-
     while (!queue.empty()) {
         pair<int, PropID> top_pair = queue.pop();
         int distance = top_pair.first;
         PropID prop_id = top_pair.second;
         Proposition *prop = get_proposition(prop_id);
-        int prop_cost = prop->cost;
-        if (prop_cost < distance) continue;
+
+        if (prop->cost < distance)
+            continue;
+
+        // DEBUG: Print proposition ID and cost
+        cerr << "[ANTPLAN] Exploring prop_id=" << prop_id
+             << " with relaxed cost=" << prop->cost << endl;
 
         if (prop->is_goal && --unsolved_goals == 0) {
             break;
@@ -81,66 +87,64 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
         for (OpID op_id : precondition_of_pool.get_slice(
                  prop->precondition_of, prop->num_precondition_occurences)) {
             UnaryOperator *unary_op = get_operator(op_id);
-            unary_op->cost = max(unary_op->cost, unary_op->base_cost + prop_cost);
+            unary_op->cost = max(unary_op->cost, unary_op->base_cost + prop->cost);
             --unary_op->unsatisfied_preconditions;
             if (unary_op->unsatisfied_preconditions == 0)
                 enqueue_if_necessary(unary_op->effect, unary_op->cost);
         }
     }
 
-    // If any goal is unreachable, it's a dead end
+    // --- Phase 2: Compute symbolic relaxed cost (max over goals) ---
+    int sym_cost = 0;
     for (PropID goal_id : goal_propositions) {
         const Proposition *goal = get_proposition(goal_id);
-        if (goal->cost == -1)
+        if (goal->cost == -1) {
             return DEAD_END;
-    }
-
-    // Compute symbolic cost like hmax
-    int symbolic_cost = 0;
-    for (PropID goal_id : goal_propositions) {
-        const Proposition *goal = get_proposition(goal_id);
-        symbolic_cost = max(symbolic_cost, goal->cost);
-    }
-
-    // Build relaxed state from all propositions with cost != -1
-    std::map<std::string, std::string> relaxed_state_map;
-    int idx = 0;
-    for (const Proposition &prop : propositions) {
-        if (prop.cost != -1) {
-            // Convert this proposition to its fact name using get_fact(idx)
-            FactPair fact_pair = get_fact(idx);
-            std::string fact_name = task_proxy.get_variables()[fact_pair.var]
-                                                 .get_fact(fact_pair.value)
-                                                 .get_name();
-            relaxed_state_map["p" + std::to_string(idx)] = fact_name;
         }
-        idx++;
+        sym_cost = max(sym_cost, goal->cost);
     }
 
-    int anticipatory_cost = 0;
+    // --- Phase 3: Build state map for Python anticipatory cost ---
+    std::map<std::string, std::string> state_map;
+    for (VariableProxy var : task_proxy.get_variables()) {
+        FactProxy fact = state[var];
+        state_map[var.get_name()] = fact.get_name();
+    }
+
+    // DEBUG: Print symbolic snapshot
+    cerr << "[ANTPLAN] Current symbolic state:" << endl;
+    for (const auto &p : state_map) {
+        cerr << "  " << p.first << " -> " << p.second << endl;
+    }
+
+    // --- Phase 4: Call Python anticipatory function ---
+    int ant_cost = 0;
     try {
-        anticipatory_cost = py_cost_fn(py::cast(relaxed_state_map)).cast<int>();
+        ant_cost = py_cost_fn(py::cast(state_map)).cast<int>();
     } catch (const py::error_already_set &e) {
-        cerr << "ANTPLAN: Python error in symbolic evaluation:\n" << e.what() << endl;
+        cerr << "ANTPLAN: Python error in anticipatory cost:\n" << e.what() << endl;
         return DEAD_END;
     }
 
-    int final_cost = symbolic_cost + anticipatory_cost;
+    int final_cost = sym_cost + ant_cost;
 
-    cerr << "[ANTPLAN DEBUG] symbolic=" << symbolic_cost
-         << ", anticipatory=" << anticipatory_cost
-         << ", total=" << final_cost << endl;
+    // DEBUG: Print heuristic breakdown
+    cerr << "[ANTPLAN] Heuristic result => sym_cost=" << sym_cost
+         << " + ant_cost=" << ant_cost
+         << " => final_cost=" << final_cost << endl;
 
     return final_cost;
 }
 
+// --- Python function setup ---
 void AntPlanHeuristic::initialize_python_function(const std::string &func_name) {
     py_func_name = func_name;
     ensure_python_ready();
 }
 
 void AntPlanHeuristic::ensure_python_ready() {
-    if (py_ready) return;
+    if (py_ready)
+        return;
     py::initialize_interpreter();
     py::module sys = py::module::import("sys");
     sys.attr("path").attr("insert")(0, ".");
@@ -149,6 +153,7 @@ void AntPlanHeuristic::ensure_python_ready() {
     py_ready = true;
 }
 
+// --- Plugin registration ---
 static shared_ptr<Heuristic> _parse(options::OptionParser &parser) {
     parser.document_synopsis("Anticipatory symbolic exploration heuristic (C++ + Python)", "");
     parser.document_property("admissible", "no");
