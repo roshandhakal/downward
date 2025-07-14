@@ -47,6 +47,12 @@ void AntPlanHeuristic::ensure_python_ready() {
 
     py::module sys = py::module::import("sys");
     sys.attr("path").attr("insert")(0, "./antplan/models");
+    py::list sys_path = sys.attr("path");
+
+    std::cerr << "Python sys.path:" << std::endl;
+    for (auto item : sys_path) {
+        std::cerr << "  " << std::string(py::str(item)) << std::endl;
+    }
 
     try {
         py::module mdl = py::module::import("antplan_model");
