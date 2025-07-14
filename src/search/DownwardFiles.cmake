@@ -541,6 +541,14 @@ fast_downward_plugin(
 )
 
 fast_downward_plugin(
+    NAME ANTPLAN_HEURISTIC
+    HELP "The anticipatory planning heuristic"
+    SOURCES
+        heuristics/antplan_heuristic
+    DEPENDS PRIORITY_QUEUES TASK_PROPERTIES
+)
+
+fast_downward_plugin(
     NAME MAX_HEURISTIC
     HELP "The Max heuristic"
     SOURCES

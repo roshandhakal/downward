@@ -22,12 +22,15 @@ option(
   "Enable the libstdc++ debug mode that does additional safety checks. (On Linux systems, g++ and clang++ usually use libstdc++ for the C++ library.) The checks come at a significant performance cost and should only be enabled in debug mode. Enabling them makes the binary incompatible with libraries that are not compiled with this flag, which can lead to hard-to-debug errors."
   FALSE)
 
+find_package(pybind11 REQUIRED)
+
 fast_downward_set_compiler_flags()
 fast_downward_set_linker_flags()
 
 # Collect source files needed for the active plugins.
 include("${CMAKE_CURRENT_SOURCE_DIR}/DownwardFiles.cmake")
 add_executable(downward ${PLANNER_SOURCES})
+target_link_libraries(downward PRIVATE pybind11::embed)
 
 ## == Includes ==
 
