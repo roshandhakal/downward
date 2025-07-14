@@ -46,7 +46,7 @@ void AntPlanHeuristic::ensure_python_ready() {
     // py::gil_scoped_acquire acquire;
 
     py::module sys = py::module::import("sys");
-    sys.attr("path").attr("insert")(0, "./models");
+    sys.attr("path").attr("insert")(0, "./antplan/models");
 
     try {
         py::module mdl = py::module::import("antplan_model");
