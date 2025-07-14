@@ -80,7 +80,12 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
             FactProxy fact = state[var];
             state_map[var.get_name()] = fact.get_name();
         }
-
+        // Log symbolic state
+        cerr << "[ANTPLAN] Symbolic state explored at cost: " << distance << endl;
+        for (const auto &pair : state_map) {
+            cerr << "  " << pair.first << ": " << pair.second << endl;
+        }
+        cerr << "---" << endl;
         try {
             int py_cost = py_cost_fn(py::cast(state_map)).cast<int>();
             int combined_cost = distance + py_cost;
