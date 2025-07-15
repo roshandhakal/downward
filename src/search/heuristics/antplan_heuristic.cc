@@ -6,110 +6,116 @@
 #include "../plugin.h"
 
 #include <pybind11/stl.h>
+#include <pybind11/embed.h>
 #include <limits>
 #include <iostream>
 #include <algorithm>
+#include <queue>
 
 using namespace std;
 namespace py = pybind11;
+using namespace relaxation_heuristic;
 
 namespace antplan_heuristic {
 
-// Static Python integration
+// Python integration
 py::object AntPlanHeuristic::py_cost_fn;
 bool AntPlanHeuristic::py_ready = false;
 std::string AntPlanHeuristic::py_func_name = "anticipatory_cost_fn";
 
+// Constructor
 AntPlanHeuristic::AntPlanHeuristic(const options::Options &opts)
-    : relaxation_heuristic::RelaxationHeuristic(opts) {
+    : RelaxationHeuristic(opts) {
     std::string func_name = opts.get<std::string>("function");
     initialize_python_function(func_name);
-    utils::g_log << "Initialized AntPlan heuristic with proper relaxed simulation." << endl;
+    utils::g_log << "Initialized AntPlan heuristic with combined-cost priority queue." << endl;
 }
 
+// Reset queue and proposition costs
 void AntPlanHeuristic::setup_exploration_queue() {
-    // Clear queue and reset proposition costs
-    while (!queue.empty()) queue.pop();
+    while (!queue.empty())
+        queue.pop();
     for (auto &prop : propositions)
         prop.cost = -1;
-
     for (auto &op : unary_operators) {
         op.unsatisfied_preconditions = op.num_preconditions;
         op.cost = op.base_cost;
     }
 }
 
-void AntPlanHeuristic::setup_exploration_queue_state(const State &state) {
-    std::vector<int> facts;
-    for (FactProxy fact : state)
-        facts.push_back(fact.get_value());
-
+// Initialize relaxed state from current state
+void AntPlanHeuristic::setup_exploration_queue_state(const State &state, std::vector<int> *facts) {
     for (FactProxy fact : state) {
-        PropID prop_id = get_prop_id(fact);
-        enqueue_if_necessary(prop_id, 0, facts);
+        facts->push_back(fact.get_value());
     }
 }
 
-void AntPlanHeuristic::enqueue_if_necessary(PropID prop_id, int cost, const std::vector<int> &facts) {
+// Add to queue with anticipatory cost
+void AntPlanHeuristic::enqueue_if_necessary(PropID prop_id, int distance, const std::vector<int> &facts) {
     Proposition *prop = get_proposition(prop_id);
-    if (prop->cost == -1 || prop->cost > cost) {
-        prop->cost = cost;
-        queue.push({cost, prop_id, facts});
-    }
-}
+    if (prop->cost == -1 || prop->cost > distance) {
+        prop->cost = distance;
 
-int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
-    State state = convert_ancestor_state(ancestor_state);
-
-    setup_exploration_queue();
-    setup_exploration_queue_state(state);
-
-    int unsolved_goals = goal_propositions.size();
-    int best_combined_cost = std::numeric_limits<int>::max();
-
-    cerr << "[ANTPLAN] Starting relaxed exploration with full simulation..." << endl;
-
-    while (!queue.empty()) {
-        RelaxedNode node = queue.top();
-        queue.pop();
-
-        int distance = node.cost;
-        PropID prop_id = node.prop_id;
-        Proposition *prop = get_proposition(prop_id);
-        if (prop->cost < distance)
-            continue;
-
-        // Build snapshot for Python
+        // Build symbolic snapshot for Python
         std::map<std::string, std::string> state_map;
         int num_vars = task_proxy.get_variables().size();
         for (int var_id = 0; var_id < num_vars; ++var_id) {
             VariableProxy var = task_proxy.get_variables()[var_id];
-            FactProxy fact = var.get_fact(node.facts[var_id]);
+            FactProxy fact = var.get_fact(facts[var_id]);
             state_map[var.get_name()] = fact.get_name();
         }
 
-        // Compute anticipatory cost
         int ant_cost = 0;
         try {
             ant_cost = py_cost_fn(py::cast(state_map)).cast<int>();
         } catch (const py::error_already_set &e) {
-            cerr << "ANTPLAN: Python error:\n" << e.what() << endl;
-            return DEAD_END;
+            cerr << "ANTPLAN: Python error in anticipatory cost:\n" << e.what() << endl;
+            return;
         }
 
         int combined_cost = distance + ant_cost;
-        best_combined_cost = min(best_combined_cost, combined_cost);
+        queue.push({combined_cost, prop_id});
 
-        // DEBUG
-        cerr << "[ANTPLAN] Node expanded: dist=" << distance
-             << " ant_cost=" << ant_cost
+        cerr << "[ANTPLAN] Enqueued PropID=" << prop_id
+             << " dist=" << distance << " ant_cost=" << ant_cost
              << " combined=" << combined_cost << endl;
+    }
+}
 
-        if (prop->is_goal && --unsolved_goals == 0)
+// Main heuristic computation
+int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
+    State state = convert_ancestor_state(ancestor_state);
+
+    std::vector<int> relaxed_facts;
+    setup_exploration_queue();
+    setup_exploration_queue_state(state, &relaxed_facts);
+
+    // Enqueue all facts from current state with distance 0
+    for (FactProxy fact : state) {
+        enqueue_if_necessary(get_prop_id(fact), 0, relaxed_facts);
+    }
+
+    int unsolved_goals = goal_propositions.size();
+    int best_combined_cost = std::numeric_limits<int>::max();
+
+    cerr << "[ANTPLAN] Starting relaxed exploration with anticipatory guidance..." << endl;
+
+    while (!queue.empty()) {
+        QueueEntry entry = queue.top();
+        queue.pop();
+
+        int combined_cost = entry.combined_cost;
+        PropID prop_id = entry.prop_id;
+        Proposition *prop = get_proposition(prop_id);
+
+        if (prop->is_goal && --unsolved_goals == 0) {
+            best_combined_cost = combined_cost;
             break;
+        }
 
         // Expand successors
-        for (auto op_id : precondition_of_pool.get_slice(prop->precondition_of, prop->num_precondition_occurences)) {
+        for (relaxation_heuristic::OpID op_id : precondition_of_pool.get_slice(
+                 prop->precondition_of, prop->num_precondition_occurences)) {
             UnaryOperator *unary_op = get_operator(op_id);
             unary_op->cost = max(unary_op->cost, unary_op->base_cost + prop->cost);
             --unary_op->unsatisfied_preconditions;
@@ -117,12 +123,13 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
             if (unary_op->unsatisfied_preconditions == 0) {
                 PropID effect_id = unary_op->effect;
 
-                // Copy current facts and apply effect
-                std::vector<int> new_facts = node.facts;
+                // Decode variable and apply relaxed effect
                 int var_index = -1, value = -1;
                 int current_offset = 0;
+                int num_vars = task_proxy.get_variables().size();
                 for (int v = 0; v < num_vars; ++v) {
-                    int domain_size = task_proxy.get_variables()[v].get_domain_size();
+                    VariableProxy var = task_proxy.get_variables()[v];
+                    int domain_size = var.get_domain_size();
                     if (effect_id < current_offset + domain_size) {
                         var_index = v;
                         value = effect_id - current_offset;
@@ -130,29 +137,30 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
                     }
                     current_offset += domain_size;
                 }
-                if (var_index >= 0 && value >= 0)
-                    new_facts[var_index] = value;
 
-                enqueue_if_necessary(unary_op->effect, unary_op->cost, new_facts);
+                if (var_index >= 0 && value >= 0) {
+                    relaxed_facts[var_index] = value;
+                }
+
+                enqueue_if_necessary(unary_op->effect, unary_op->cost, relaxed_facts);
             }
         }
     }
 
-    cerr << "[ANTPLAN] Best combined cost: " << best_combined_cost << endl;
-
+    cerr << "[ANTPLAN] Best combined cost returned: " << best_combined_cost << endl;
     return (best_combined_cost == std::numeric_limits<int>::max())
                ? DEAD_END
                : best_combined_cost;
 }
 
+// Python setup
 void AntPlanHeuristic::initialize_python_function(const std::string &func_name) {
     py_func_name = func_name;
     ensure_python_ready();
 }
 
 void AntPlanHeuristic::ensure_python_ready() {
-    if (py_ready)
-        return;
+    if (py_ready) return;
     py::initialize_interpreter();
     py::module sys = py::module::import("sys");
     sys.attr("path").attr("insert")(0, ".");
@@ -161,8 +169,9 @@ void AntPlanHeuristic::ensure_python_ready() {
     py_ready = true;
 }
 
+// Plugin registration
 static shared_ptr<Heuristic> _parse(options::OptionParser &parser) {
-    parser.document_synopsis("Anticipatory heuristic with full relaxed simulation.", "");
+    parser.document_synopsis("Anticipatory heuristic with combined cost priority queue.", "");
     parser.document_property("admissible", "no");
     parser.document_property("consistent", "no");
     parser.document_property("safe", "yes");
