@@ -3,108 +3,171 @@
 #include "../option_parser.h"
 #include "../plugin.h"
 #include "../task_proxy.h"
+#include "../task_utils/task_properties.h"
 #include "../utils/logging.h"
 
-#include <map>
-#include <string>
-#include <vector>
 #include <cassert>
+#include <map>
+#include <algorithm>
 
-using namespace std;
 namespace py = pybind11;
+using namespace std;
 
 namespace antplan_heuristic {
 
-// Static variables
+// Static definitions
 py::object AntPlanHeuristic::py_cost_fn;
 bool AntPlanHeuristic::py_ready = false;
 std::string AntPlanHeuristic::py_func_name = "anticipatory_cost_fn";
 
-// Constructor
 AntPlanHeuristic::AntPlanHeuristic(const options::Options &opts)
-    : FFHeuristic(opts) {
+    : AdditiveHeuristic(opts),
+      relaxed_plan(task_proxy.get_operators().size(), false) {
     string func_name = opts.get<std::string>("function");
     initialize_python_function(func_name);
-    utils::g_log << "Initialized AntPlan heuristic with Python function: "
+
+    utils::g_log << "Initializing AntPlan heuristic with Python function: "
                  << func_name << endl;
 }
 
 AntPlanHeuristic::~AntPlanHeuristic() {
-    // Do not finalize Python interpreter; shared resource
+    // Do not finalize interpreter globally; FD may use it for other components.
 }
 
-// Initialize Python function
 void AntPlanHeuristic::initialize_python_function(const std::string &func_name) {
     py_func_name = func_name;
     py_ready = false;
     ensure_python_ready();
 }
 
-// Make ensure_python_ready static
 void AntPlanHeuristic::ensure_python_ready() {
-    if (!py_ready) {
-        py::initialize_interpreter();
-        py::module main = py::module::import("__main__");
-        py::object global = main.attr("__dict__");
+    if (py_ready)
+        return;
 
-        if (!global.contains(py_func_name.c_str())) {
-            throw std::runtime_error("Python function " + py_func_name + " not found.");
-        }
-
-        py_cost_fn = global[py_func_name.c_str()];
-        py_ready = true;
-    }
+    py::initialize_interpreter();
+    py::module sys = py::module::import("sys");
+    sys.attr("path").attr("insert")(0, ".");
+    py::module mdl = py::module::import("antplan_model"); // Python file
+    py_cost_fn = mdl.attr(py_func_name.c_str());
+    py_ready = true;
 }
 
-// Compute AntPlan cost via Python
-int AntPlanHeuristic::compute_antplan_cost(const State &state) {
+std::map<std::string, std::string> AntPlanHeuristic::convert_state_to_map(const State &state) {
     std::map<std::string, std::string> state_map;
-
-    // Convert FD state to map<string,string>
-    for (FactProxy fact : state) {
-        std::string var_name = fact.get_variable().get_name();
-        std::string value_name = fact.get_variable().get_fact(fact.get_value()).get_name();
-        state_map[var_name] = value_name;
+    int num_vars = task_proxy.get_variables().size();
+    for (int var_id = 0; var_id < num_vars; ++var_id) {
+        VariableProxy var = task_proxy.get_variables()[var_id];
+        FactProxy fact = state[var_id]; // Direct access from State
+        state_map[var.get_name()] = fact.get_name();
     }
-
-    int ant_cost = 0;
-    try {
-        py::gil_scoped_acquire acquire;
-        py::dict py_state;
-        for (auto &pair : state_map) {
-            py_state[py::str(pair.first)] = py::str(pair.second);
-        }
-        ant_cost = py_cost_fn(py_state).cast<int>();
-    } catch (const std::exception &e) {
-        utils::g_log << "[AntPlanHeuristic] Python error: " << e.what() << endl;
-    }
-    return ant_cost;
+    return state_map;
 }
 
-// Compute combined heuristic = FF + AntPlan
+void AntPlanHeuristic::mark_preferred_operators_and_relaxed_plan(
+    const State &state, PropID goal_id) {
+    Proposition *goal = get_proposition(goal_id);
+    if (!goal->marked) {
+        goal->marked = true;
+        OpID op_id = goal->reached_by;
+        if (op_id != NO_OP) {
+            UnaryOperator *unary_op = get_operator(op_id);
+            bool is_preferred = true;
+            for (PropID precond : get_preconditions(op_id)) {
+                mark_preferred_operators_and_relaxed_plan(state, precond);
+                if (get_proposition(precond)->reached_by != NO_OP) {
+                    is_preferred = false;
+                }
+            }
+            int operator_no = unary_op->operator_no;
+            if (operator_no != -1) {
+                relaxed_plan[operator_no] = true;
+                if (is_preferred) {
+                    OperatorProxy op = task_proxy.get_operators()[operator_no];
+                    assert(task_properties::is_applicable(op, state));
+                    set_preferred(op);
+                }
+            }
+        }
+    }
+}
+
 int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
     State state = convert_ancestor_state(ancestor_state);
+    int h_add = compute_add_and_ff(state);
+    if (h_add == DEAD_END)
+        return h_add;
 
-    int h_ff = FFHeuristic::compute_heuristic(state);
-    if (h_ff == DEAD_END)
-        return DEAD_END;
+    // FF part: Collect relaxed plan and compute FF cost
+    for (PropID goal_id : goal_propositions)
+        mark_preferred_operators_and_relaxed_plan(state, goal_id);
 
-    int h_ant = compute_antplan_cost(state);
-    return h_ff + h_ant;
+    int h_ff = 0;
+    for (size_t op_no = 0; op_no < relaxed_plan.size(); ++op_no) {
+        if (relaxed_plan[op_no]) {
+            relaxed_plan[op_no] = false; // Reset for next call
+            h_ff += task_proxy.get_operators()[op_no].get_cost();
+        }
+    }
+
+    // Anticipatory cost: simulate successors manually
+    vector<int> successor_costs;
+    int num_vars = task_proxy.get_variables().size();
+
+    for (OperatorProxy op : task_proxy.get_operators()) {
+        if (task_properties::is_applicable(op, state)) {
+            // Copy current state into int vector
+            vector<int> succ_values;
+            succ_values.reserve(num_vars);
+            for (int var_id = 0; var_id < num_vars; ++var_id) {
+                succ_values.push_back(state[var_id].get_value());
+            }
+
+            // Apply effects manually
+            for (EffectProxy eff : op.get_effects()) {
+                succ_values[eff.get_fact().get_variable().get_id()] = eff.get_fact().get_value();
+            }
+
+            // Convert successor to map<string, string>
+            map<string, string> succ_map;
+            for (int var_id = 0; var_id < num_vars; ++var_id) {
+                VariableProxy var = task_proxy.get_variables()[var_id];
+                FactProxy fact = var.get_fact(succ_values[var_id]);
+                succ_map[var.get_name()] = fact.get_name();
+            }
+
+            try {
+                int val = py_cost_fn(py::cast(succ_map)).cast<int>();
+                successor_costs.push_back(val);
+            } catch (const std::exception &e) {
+                utils::g_log << "Python function failed: " << e.what() << endl;
+            }
+        }
+    }
+
+    int anticipatory_cost = 0;
+    if (!successor_costs.empty()) {
+        anticipatory_cost = *min_element(successor_costs.begin(), successor_costs.end());
+    }
+
+    int alpha = 1; // Hardcoded weight for now
+    return h_ff + alpha * anticipatory_cost;
 }
 
-// Register plugin
-static shared_ptr<Heuristic> _parse(OptionParser &parser) {
-    parser.document_synopsis("AntPlan + FF heuristic combined", "");
-    parser.add_option<std::string>("function", "Name of Python cost function");
+// Plugin integration
+static std::shared_ptr<Heuristic> _parse(OptionParser &parser) {
+    parser.document_synopsis(
+        "AntPlan heuristic",
+        "Combines FF heuristic with anticipatory successor evaluation using Python.");
+    parser.add_option<std::string>(
+        "function", "Python function name in antplan_model.py");
     Heuristic::add_options_to_parser(parser);
     Options opts = parser.parse();
     if (parser.dry_run())
         return nullptr;
     else
-        return make_shared<AntPlanHeuristic>(opts);
+        return std::make_shared<AntPlanHeuristic>(opts);
 }
 
 static Plugin<Evaluator> _plugin("antplan", _parse);
 
-}
+} // namespace antplan_heuristic
