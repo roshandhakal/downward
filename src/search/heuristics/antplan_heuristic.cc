@@ -1,190 +1,110 @@
 #include "antplan_heuristic.h"
-#include "relaxation_heuristic.h"
-#include "../task_proxy.h"
-#include "../utils/logging.h"
+
 #include "../option_parser.h"
 #include "../plugin.h"
+#include "../task_proxy.h"
+#include "../utils/logging.h"
 
-#include <pybind11/stl.h>
-#include <pybind11/embed.h>
-#include <limits>
-#include <iostream>
-#include <algorithm>
-#include <queue>
+#include <map>
+#include <string>
+#include <vector>
+#include <cassert>
 
 using namespace std;
 namespace py = pybind11;
-using namespace relaxation_heuristic;
 
 namespace antplan_heuristic {
 
-// Python integration
+// Static variables
 py::object AntPlanHeuristic::py_cost_fn;
 bool AntPlanHeuristic::py_ready = false;
 std::string AntPlanHeuristic::py_func_name = "anticipatory_cost_fn";
 
 // Constructor
 AntPlanHeuristic::AntPlanHeuristic(const options::Options &opts)
-    : RelaxationHeuristic(opts) {
-    std::string func_name = opts.get<std::string>("function");
+    : FFHeuristic(opts) {
+    string func_name = opts.get<std::string>("function");
     initialize_python_function(func_name);
-    utils::g_log << "Initialized AntPlan heuristic with combined-cost priority queue." << endl;
+    utils::g_log << "Initialized AntPlan heuristic with Python function: "
+                 << func_name << endl;
 }
 
-// Reset queue and proposition costs
-void AntPlanHeuristic::setup_exploration_queue() {
-    while (!queue.empty())
-        queue.pop();
-    for (auto &prop : propositions)
-        prop.cost = -1;
-    for (auto &op : unary_operators) {
-        op.unsatisfied_preconditions = op.num_preconditions;
-        op.cost = op.base_cost;
-    }
+AntPlanHeuristic::~AntPlanHeuristic() {
+    // Do not finalize Python interpreter; shared resource
 }
 
-// Initialize relaxed state from current state
-void AntPlanHeuristic::setup_exploration_queue_state(const State &state, std::vector<int> *facts) {
-    for (FactProxy fact : state) {
-        facts->push_back(fact.get_value());
-    }
-}
-
-// Add to queue with anticipatory cost
-void AntPlanHeuristic::enqueue_if_necessary(PropID prop_id, int distance, const std::vector<int> &facts) {
-    Proposition *prop = get_proposition(prop_id);
-    if (prop->cost == -1 || prop->cost > distance) {
-        prop->cost = distance;
-
-        // Build symbolic snapshot for Python
-        std::map<std::string, std::string> state_map;
-        int num_vars = task_proxy.get_variables().size();
-        for (int var_id = 0; var_id < num_vars; ++var_id) {
-            VariableProxy var = task_proxy.get_variables()[var_id];
-            FactProxy fact = var.get_fact(facts[var_id]);
-            state_map[var.get_name()] = fact.get_name();
-        }
-
-        int ant_cost = 0;
-        try {
-            ant_cost = py_cost_fn(py::cast(state_map)).cast<int>();
-        } catch (const py::error_already_set &e) {
-            cerr << "ANTPLAN: Python error in anticipatory cost:\n" << e.what() << endl;
-            return;
-        }
-
-        int combined_cost = distance + ant_cost;
-        queue.push({combined_cost, prop_id});
-
-        cerr << "[ANTPLAN] Enqueued PropID=" << prop_id
-             << " dist=" << distance << " ant_cost=" << ant_cost
-             << " combined=" << combined_cost << endl;
-    }
-}
-
-// Main heuristic computation
-int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
-    State state = convert_ancestor_state(ancestor_state);
-
-    std::vector<int> relaxed_facts;
-    setup_exploration_queue();
-    setup_exploration_queue_state(state, &relaxed_facts);
-
-    // Enqueue all facts from current state with distance 0
-    for (FactProxy fact : state) {
-        enqueue_if_necessary(get_prop_id(fact), 0, relaxed_facts);
-    }
-
-    int unsolved_goals = goal_propositions.size();
-    int best_combined_cost = std::numeric_limits<int>::max();
-
-    cerr << "[ANTPLAN] Starting relaxed exploration with anticipatory guidance..." << endl;
-
-    while (!queue.empty()) {
-        QueueEntry entry = queue.top();
-        queue.pop();
-
-        int combined_cost = entry.combined_cost;
-        PropID prop_id = entry.prop_id;
-        Proposition *prop = get_proposition(prop_id);
-
-        if (prop->is_goal && --unsolved_goals == 0) {
-            best_combined_cost = combined_cost;
-            break;
-        }
-
-        // Expand successors
-        for (relaxation_heuristic::OpID op_id : precondition_of_pool.get_slice(
-                 prop->precondition_of, prop->num_precondition_occurences)) {
-            UnaryOperator *unary_op = get_operator(op_id);
-            unary_op->cost = max(unary_op->cost, unary_op->base_cost + prop->cost);
-            --unary_op->unsatisfied_preconditions;
-
-            if (unary_op->unsatisfied_preconditions == 0) {
-                PropID effect_id = unary_op->effect;
-
-                // Decode variable and apply relaxed effect
-                int var_index = -1, value = -1;
-                int current_offset = 0;
-                int num_vars = task_proxy.get_variables().size();
-                for (int v = 0; v < num_vars; ++v) {
-                    VariableProxy var = task_proxy.get_variables()[v];
-                    int domain_size = var.get_domain_size();
-                    if (effect_id < current_offset + domain_size) {
-                        var_index = v;
-                        value = effect_id - current_offset;
-                        break;
-                    }
-                    current_offset += domain_size;
-                }
-
-                if (var_index >= 0 && value >= 0) {
-                    relaxed_facts[var_index] = value;
-                }
-
-                enqueue_if_necessary(unary_op->effect, unary_op->cost, relaxed_facts);
-            }
-        }
-    }
-
-    cerr << "[ANTPLAN] Best combined cost returned: " << best_combined_cost << endl;
-    return (best_combined_cost == std::numeric_limits<int>::max())
-               ? DEAD_END
-               : best_combined_cost;
-}
-
-// Python setup
+// Initialize Python function
 void AntPlanHeuristic::initialize_python_function(const std::string &func_name) {
     py_func_name = func_name;
+    py_ready = false;
     ensure_python_ready();
 }
 
+// Make ensure_python_ready static
 void AntPlanHeuristic::ensure_python_ready() {
-    if (py_ready) return;
-    py::initialize_interpreter();
-    py::module sys = py::module::import("sys");
-    sys.attr("path").attr("insert")(0, ".");
-    py::module mdl = py::module::import("antplan_model");
-    py_cost_fn = mdl.attr(py_func_name.c_str());
-    py_ready = true;
+    if (!py_ready) {
+        py::initialize_interpreter();
+        py::module main = py::module::import("__main__");
+        py::object global = main.attr("__dict__");
+
+        if (!global.contains(py_func_name.c_str())) {
+            throw std::runtime_error("Python function " + py_func_name + " not found.");
+        }
+
+        py_cost_fn = global[py_func_name.c_str()];
+        py_ready = true;
+    }
 }
 
-// Plugin registration
-static shared_ptr<Heuristic> _parse(options::OptionParser &parser) {
-    parser.document_synopsis("Anticipatory heuristic with combined cost priority queue.", "");
-    parser.document_property("admissible", "no");
-    parser.document_property("consistent", "no");
-    parser.document_property("safe", "yes");
+// Compute AntPlan cost via Python
+int AntPlanHeuristic::compute_antplan_cost(const State &state) {
+    std::map<std::string, std::string> state_map;
 
-    relaxation_heuristic::RelaxationHeuristic::add_options_to_parser(parser);
-    parser.add_option<std::string>("function", "Python function to call", "anticipatory_cost_fn");
+    // Convert FD state to map<string,string>
+    for (FactProxy fact : state) {
+        std::string var_name = fact.get_variable().get_name();
+        std::string value_name = fact.get_variable().get_fact(fact.get_value()).get_name();
+        state_map[var_name] = value_name;
+    }
 
-    options::Options opts = parser.parse();
+    int ant_cost = 0;
+    try {
+        py::gil_scoped_acquire acquire;
+        py::dict py_state;
+        for (auto &pair : state_map) {
+            py_state[py::str(pair.first)] = py::str(pair.second);
+        }
+        ant_cost = py_cost_fn(py_state).cast<int>();
+    } catch (const std::exception &e) {
+        utils::g_log << "[AntPlanHeuristic] Python error: " << e.what() << endl;
+    }
+    return ant_cost;
+}
+
+// Compute combined heuristic = FF + AntPlan
+int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
+    State state = convert_ancestor_state(ancestor_state);
+
+    int h_ff = FFHeuristic::compute_heuristic(state);
+    if (h_ff == DEAD_END)
+        return DEAD_END;
+
+    int h_ant = compute_antplan_cost(state);
+    return h_ff + h_ant;
+}
+
+// Register plugin
+static shared_ptr<Heuristic> _parse(OptionParser &parser) {
+    parser.document_synopsis("AntPlan + FF heuristic combined", "");
+    parser.add_option<std::string>("function", "Name of Python cost function");
+    Heuristic::add_options_to_parser(parser);
+    Options opts = parser.parse();
     if (parser.dry_run())
         return nullptr;
-    return make_shared<AntPlanHeuristic>(opts);
+    else
+        return make_shared<AntPlanHeuristic>(opts);
 }
 
 static Plugin<Evaluator> _plugin("antplan", _parse);
 
-} // namespace antplan_heuristic
+}
