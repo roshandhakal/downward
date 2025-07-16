@@ -109,19 +109,35 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
         }
     }
 
-    // Anticipatory part: compute cost for the CURRENT state (not successors)
+    // Anticipatory part: compute cost for the CURRENT state
     auto state_map = convert_state_to_map(state);
     int anticipatory_cost = 0;
     try {
         anticipatory_cost = py_cost_fn(py::cast(state_map)).cast<int>();
     } catch (const std::exception &e) {
-        utils::g_log << "Python function failed: " << e.what() << endl;
+        utils::g_log << "[AntPlan] Python function failed: " << e.what() << endl;
     }
 
-    // Combine FF and anticipatory
-    int alpha = 1; // For now, fixed weight
-    return h_ff + alpha * anticipatory_cost;
+    int alpha = 1;
+    int total_h = h_ff + alpha * anticipatory_cost;
+
+    // ✅ Debug Output
+    utils::g_log << "\n[AntPlan] State Evaluation:" << endl;
+    utils::g_log << "  h_FF = " << h_ff << endl;
+    utils::g_log << "  anticipatory_cost = " << anticipatory_cost << endl;
+    utils::g_log << "  total heuristic (h) = " << total_h << endl;
+    utils::g_log << "  State facts:" << endl;
+
+    for (size_t var_id = 0; var_id < task_proxy.get_variables().size(); ++var_id) {
+        VariableProxy var = task_proxy.get_variables()[var_id];
+        FactProxy fact = state[var_id];
+        utils::g_log << "    " << var.get_name() << " = " << fact.get_name() << endl;
+    }
+    utils::g_log << "----------------------------------------" << endl;
+
+    return total_h;
 }
+
 
 // Plugin integration
 static std::shared_ptr<Heuristic> _parse(OptionParser &parser) {
