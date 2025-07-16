@@ -57,7 +57,7 @@ std::map<std::string, std::string> AntPlanHeuristic::convert_state_to_map(const 
     int num_vars = task_proxy.get_variables().size();
     for (int var_id = 0; var_id < num_vars; ++var_id) {
         VariableProxy var = task_proxy.get_variables()[var_id];
-        FactProxy fact = state[var_id]; // Direct access from State
+        FactProxy fact = state[var_id]; // Access fact directly
         state_map[var.get_name()] = fact.get_name();
     }
     return state_map;
@@ -109,47 +109,17 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
         }
     }
 
-    // Anticipatory cost: simulate successors manually
-    vector<int> successor_costs;
-    int num_vars = task_proxy.get_variables().size();
-
-    for (OperatorProxy op : task_proxy.get_operators()) {
-        if (task_properties::is_applicable(op, state)) {
-            // Copy current state into int vector
-            vector<int> succ_values;
-            succ_values.reserve(num_vars);
-            for (int var_id = 0; var_id < num_vars; ++var_id) {
-                succ_values.push_back(state[var_id].get_value());
-            }
-
-            // Apply effects manually
-            for (EffectProxy eff : op.get_effects()) {
-                succ_values[eff.get_fact().get_variable().get_id()] = eff.get_fact().get_value();
-            }
-
-            // Convert successor to map<string, string>
-            map<string, string> succ_map;
-            for (int var_id = 0; var_id < num_vars; ++var_id) {
-                VariableProxy var = task_proxy.get_variables()[var_id];
-                FactProxy fact = var.get_fact(succ_values[var_id]);
-                succ_map[var.get_name()] = fact.get_name();
-            }
-
-            try {
-                int val = py_cost_fn(py::cast(succ_map)).cast<int>();
-                successor_costs.push_back(val);
-            } catch (const std::exception &e) {
-                utils::g_log << "Python function failed: " << e.what() << endl;
-            }
-        }
-    }
-
+    // Anticipatory part: compute cost for the CURRENT state (not successors)
+    auto state_map = convert_state_to_map(state);
     int anticipatory_cost = 0;
-    if (!successor_costs.empty()) {
-        anticipatory_cost = *min_element(successor_costs.begin(), successor_costs.end());
+    try {
+        anticipatory_cost = py_cost_fn(py::cast(state_map)).cast<int>();
+    } catch (const std::exception &e) {
+        utils::g_log << "Python function failed: " << e.what() << endl;
     }
 
-    int alpha = 1; // Hardcoded weight for now
+    // Combine FF and anticipatory
+    int alpha = 1; // For now, fixed weight
     return h_ff + alpha * anticipatory_cost;
 }
 
@@ -157,7 +127,7 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
 static std::shared_ptr<Heuristic> _parse(OptionParser &parser) {
     parser.document_synopsis(
         "AntPlan heuristic",
-        "Combines FF heuristic with anticipatory successor evaluation using Python.");
+        "Combines FF heuristic with anticipatory state evaluation using Python.");
     parser.add_option<std::string>(
         "function", "Python function name in antplan_model.py");
     Heuristic::add_options_to_parser(parser);
