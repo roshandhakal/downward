@@ -5,7 +5,7 @@
 #include "../task_proxy.h"
 #include "../task_utils/task_properties.h"
 #include "../utils/logging.h"
-
+#include <pybind11/stl.h> 
 #include <cassert>
 #include <map>
 #include <algorithm>
@@ -97,7 +97,7 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
     if (h_add == DEAD_END)
         return h_add;
 
-    // FF part: Collect relaxed plan and compute FF cost
+    // Collect relaxed plan for FF heuristic
     for (PropID goal_id : goal_propositions)
         mark_preferred_operators_and_relaxed_plan(state, goal_id);
 
@@ -109,25 +109,30 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
         }
     }
 
-    // Anticipatory part: compute cost for the CURRENT state
+    // Convert state to map for Python
     auto state_map = convert_state_to_map(state);
+
     int anticipatory_cost = 0;
     try {
         anticipatory_cost = py_cost_fn(py::cast(state_map)).cast<int>();
     } catch (const std::exception &e) {
         utils::g_log << "[AntPlan] Python function failed: " << e.what() << endl;
+        utils::g_log << "[AntPlan] Raw state map:" << endl;
+        for (const auto &kv : state_map) {
+            utils::g_log << "    " << kv.first << " -> " << kv.second << endl;
+        }
     }
 
     int alpha = 1;
     int total_h = h_ff + alpha * anticipatory_cost;
 
-    // ✅ Debug Output
+    // ✅ Debug output for heuristic details
     utils::g_log << "\n[AntPlan] State Evaluation:" << endl;
+    utils::g_log << "  g(n): (computed by A*) unknown here" << endl; // A* tracks g
     utils::g_log << "  h_FF = " << h_ff << endl;
     utils::g_log << "  anticipatory_cost = " << anticipatory_cost << endl;
-    utils::g_log << "  total heuristic (h) = " << total_h << endl;
+    utils::g_log << "  total h = " << total_h << endl;
     utils::g_log << "  State facts:" << endl;
-
     for (size_t var_id = 0; var_id < task_proxy.get_variables().size(); ++var_id) {
         VariableProxy var = task_proxy.get_variables()[var_id];
         FactProxy fact = state[var_id];
@@ -137,7 +142,6 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
 
     return total_h;
 }
-
 
 // Plugin integration
 static std::shared_ptr<Heuristic> _parse(OptionParser &parser) {
