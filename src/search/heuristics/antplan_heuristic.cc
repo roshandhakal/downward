@@ -91,13 +91,15 @@ void AntPlanHeuristic::mark_preferred_operators_and_relaxed_plan(
     }
 }
 
+#include <pybind11/stl.h>  // ✅ Needed for std::map -> Python dict conversion
+
 int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
     State state = convert_ancestor_state(ancestor_state);
     int h_add = compute_add_and_ff(state);
     if (h_add == DEAD_END)
         return h_add;
 
-    // Collect relaxed plan for FF heuristic
+    // FF part: compute h_FF and preferred operators
     for (PropID goal_id : goal_propositions)
         mark_preferred_operators_and_relaxed_plan(state, goal_id);
 
@@ -109,30 +111,67 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
         }
     }
 
-    // Convert state to map for Python
-    auto state_map = convert_state_to_map(state);
+    // ✅ One-step lookahead: Evaluate anticipatory cost of successors
+    int best_anticipatory = std::numeric_limits<int>::max();
+    utils::g_log << "\n[AntPlan] Evaluating successors for lookahead from current state:" << endl;
 
-    int anticipatory_cost = 0;
-    try {
-        anticipatory_cost = py_cost_fn(py::cast(state_map)).cast<int>();
-    } catch (const std::exception &e) {
-        utils::g_log << "[AntPlan] Python function failed: " << e.what() << endl;
-        utils::g_log << "[AntPlan] Raw state map:" << endl;
-        for (const auto &kv : state_map) {
-            utils::g_log << "    " << kv.first << " -> " << kv.second << endl;
+    for (OperatorProxy op : task_proxy.get_operators()) {
+        // Check if operator is applicable to current state
+        if (!task_properties::is_applicable(op, state))
+            continue;
+
+        // Copy current state's variable values
+        std::vector<int> succ_values;
+        succ_values.reserve(task_proxy.get_variables().size());
+        for (size_t i = 0; i < task_proxy.get_variables().size(); ++i) {
+            succ_values.push_back(state[i].get_value());
         }
+
+        // Apply effects of operator to successor values
+        for (EffectProxy eff : op.get_effects()) {
+            int var_id = eff.get_fact().get_variable().get_id();
+            int value = eff.get_fact().get_value();
+            succ_values[var_id] = value;
+        }
+
+        // Convert successor to map<string,string> for Python
+        std::map<std::string, std::string> succ_map;
+        for (size_t i = 0; i < task_proxy.get_variables().size(); ++i) {
+            VariableProxy var = task_proxy.get_variables()[i];
+            FactProxy fact = var.get_fact(succ_values[i]);
+            succ_map[var.get_name()] = fact.get_name();
+        }
+
+        // Call Python anticipatory cost function
+        int anticipatory_cost = 0;
+        try {
+            anticipatory_cost = py_cost_fn(py::cast(succ_map)).cast<int>();
+        } catch (const std::exception &e) {
+            utils::g_log << "[AntPlan] Python function failed for successor: " << e.what() << endl;
+            continue;
+        }
+
+        utils::g_log << "  Successor via op '" << op.get_name()
+                     << "' anticipatory_cost = " << anticipatory_cost << endl;
+
+        if (anticipatory_cost < best_anticipatory)
+            best_anticipatory = anticipatory_cost;
     }
 
-    int alpha = 1;
-    int total_h = h_ff + alpha * anticipatory_cost;
+    if (best_anticipatory == std::numeric_limits<int>::max()) {
+        best_anticipatory = 0; // No successors (dead end)
+    }
 
-    // ✅ Debug output for heuristic details
-    utils::g_log << "\n[AntPlan] State Evaluation:" << endl;
-    utils::g_log << "  g(n): (computed by A*) unknown here" << endl; // A* tracks g
+    // Combine FF cost with best anticipatory cost
+    int total_h = h_ff + best_anticipatory;
+
+    // ✅ Debug Output for Current State
+    utils::g_log << "\n[AntPlan] Current State Heuristic:" << endl;
     utils::g_log << "  h_FF = " << h_ff << endl;
-    utils::g_log << "  anticipatory_cost = " << anticipatory_cost << endl;
-    utils::g_log << "  total h = " << total_h << endl;
+    utils::g_log << "  best anticipatory among successors = " << best_anticipatory << endl;
+    utils::g_log << "  total heuristic (h) = " << total_h << endl;
     utils::g_log << "  State facts:" << endl;
+
     for (size_t var_id = 0; var_id < task_proxy.get_variables().size(); ++var_id) {
         VariableProxy var = task_proxy.get_variables()[var_id];
         FactProxy fact = state[var_id];
@@ -142,6 +181,7 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
 
     return total_h;
 }
+
 
 // Plugin integration
 static std::shared_ptr<Heuristic> _parse(OptionParser &parser) {
