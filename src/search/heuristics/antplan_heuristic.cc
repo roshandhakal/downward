@@ -106,28 +106,32 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
     int h_ff = 0;
     for (size_t op_no = 0; op_no < relaxed_plan.size(); ++op_no) {
         if (relaxed_plan[op_no]) {
-            relaxed_plan[op_no] = false; // Reset for next call
+            relaxed_plan[op_no] = false;
             h_ff += task_proxy.get_operators()[op_no].get_cost();
         }
     }
 
-    // ✅ One-step lookahead: Evaluate anticipatory cost of successors
+    // ✅ One-step lookahead: Only consider placement actions
     int best_anticipatory = std::numeric_limits<int>::max();
-    utils::g_log << "\n[AntPlan] Evaluating successors for lookahead from current state:" << endl;
+    utils::g_log << "\n[AntPlan] Evaluating placement successors for lookahead:" << endl;
 
     for (OperatorProxy op : task_proxy.get_operators()) {
-        // Check if operator is applicable to current state
         if (!task_properties::is_applicable(op, state))
             continue;
 
-        // Copy current state's variable values
+        // Skip non-placement actions
+        std::string op_name = op.get_name();
+        if (op_name.find("place") == std::string::npos)
+            continue;
+
+        // Copy current state values
         std::vector<int> succ_values;
         succ_values.reserve(task_proxy.get_variables().size());
         for (size_t i = 0; i < task_proxy.get_variables().size(); ++i) {
             succ_values.push_back(state[i].get_value());
         }
 
-        // Apply effects of operator to successor values
+        // Apply effects of the placement operator
         for (EffectProxy eff : op.get_effects()) {
             int var_id = eff.get_fact().get_variable().get_id();
             int value = eff.get_fact().get_value();
@@ -142,16 +146,16 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
             succ_map[var.get_name()] = fact.get_name();
         }
 
-        // Call Python anticipatory cost function
+        // Compute anticipatory cost for this placement
         int anticipatory_cost = 0;
         try {
             anticipatory_cost = py_cost_fn(py::cast(succ_map)).cast<int>();
         } catch (const std::exception &e) {
-            utils::g_log << "[AntPlan] Python function failed for successor: " << e.what() << endl;
+            utils::g_log << "[AntPlan] Python function failed for placement: " << e.what() << endl;
             continue;
         }
 
-        utils::g_log << "  Successor via op '" << op.get_name()
+        utils::g_log << "  Placement via op '" << op_name
                      << "' anticipatory_cost = " << anticipatory_cost << endl;
 
         if (anticipatory_cost < best_anticipatory)
@@ -159,16 +163,15 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
     }
 
     if (best_anticipatory == std::numeric_limits<int>::max()) {
-        best_anticipatory = 0; // No successors (dead end)
+        best_anticipatory = 0; // No placement actions available
     }
 
-    // Combine FF cost with best anticipatory cost
     int total_h = h_ff + best_anticipatory;
 
     // ✅ Debug Output for Current State
     utils::g_log << "\n[AntPlan] Current State Heuristic:" << endl;
     utils::g_log << "  h_FF = " << h_ff << endl;
-    utils::g_log << "  best anticipatory among successors = " << best_anticipatory << endl;
+    utils::g_log << "  best anticipatory (placement only) = " << best_anticipatory << endl;
     utils::g_log << "  total heuristic (h) = " << total_h << endl;
     utils::g_log << "  State facts:" << endl;
 
