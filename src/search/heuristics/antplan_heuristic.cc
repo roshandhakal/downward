@@ -24,9 +24,6 @@ AntPlanHeuristic::AntPlanHeuristic(const options::Options &opts)
     : AdditiveHeuristic(opts),
       relaxed_plan(task_proxy.get_operators().size(), false) {
     string func_name = opts.get<std::string>("function");
-    string module_name = opts.get<std::string>("module");
-    py_func_name = func_name;
-    py_module_name = module_name;
     initialize_python_function(func_name);
 
     utils::g_log << "Initializing AntPlan heuristic with Python function: "
@@ -39,7 +36,6 @@ AntPlanHeuristic::~AntPlanHeuristic() {
 
 void AntPlanHeuristic::initialize_python_function(const std::string &func_name) {
     py_func_name = func_name;
-    static std::string py_module_name;
     py_ready = false;
     ensure_python_ready();
 }
@@ -51,8 +47,7 @@ void AntPlanHeuristic::ensure_python_ready() {
     py::initialize_interpreter();
     py::module sys = py::module::import("sys");
     sys.attr("path").attr("insert")(0, ".");
-    py::module mdl = py::module::import(py_module_name.c_str()); // Dynamic module
-
+    py::module mdl = py::module::import("test_simple_example"); // Python file
     py_cost_fn = mdl.attr(py_func_name.c_str());
     py_ready = true;
 }
@@ -96,6 +91,7 @@ void AntPlanHeuristic::mark_preferred_operators_and_relaxed_plan(
     }
 }
 
+#include <pybind11/stl.h>  // ✅ Needed for std::map -> Python dict conversion
 
 int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
     State state = convert_ancestor_state(ancestor_state);
@@ -154,8 +150,8 @@ static std::shared_ptr<Heuristic> _parse(OptionParser &parser) {
     parser.document_synopsis(
         "AntPlan heuristic",
         "Combines FF heuristic with anticipatory state evaluation using Python.");
-    parser.add_option<std::string>("function", "Python function name to call");
-    parser.add_option<std::string>("module", "Python module name (without .py)");
+    parser.add_option<std::string>(
+        "function", "Python function name in antplan_model.py");
     Heuristic::add_options_to_parser(parser);
     Options opts = parser.parse();
     if (parser.dry_run())
