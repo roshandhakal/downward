@@ -47,7 +47,7 @@ void AntPlanHeuristic::ensure_python_ready() {
     py::initialize_interpreter();
     py::module sys = py::module::import("sys");
     sys.attr("path").attr("insert")(0, ".");
-    py::module mdl = py::module::import("antplan.test_examples.test_simple_example"); // Python file
+    py::module mdl = py::module::import("antplan.test_examples.test_antplan_example"); // Python file
     py_cost_fn = mdl.attr(py_func_name.c_str());
     py_ready = true;
 }
