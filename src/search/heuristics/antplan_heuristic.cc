@@ -19,13 +19,11 @@ namespace antplan_heuristic {
 py::object AntPlanHeuristic::py_cost_fn;
 bool AntPlanHeuristic::py_ready = false;
 std::string AntPlanHeuristic::py_func_name = "anticipatory_cost_fn";
-std::string AntPlanHeuristic::model_path = ""; 
 
 AntPlanHeuristic::AntPlanHeuristic(const options::Options &opts)
     : AdditiveHeuristic(opts),
       relaxed_plan(task_proxy.get_operators().size(), false) {
     string func_name = opts.get<std::string>("function");
-    model_path = opts.get<std::string>("model_path"); 
     initialize_python_function(func_name);
 
     utils::g_log << "Initializing AntPlan heuristic with Python function: "
@@ -50,7 +48,6 @@ void AntPlanHeuristic::ensure_python_ready() {
     py::module sys = py::module::import("sys");
     sys.attr("path").attr("insert")(0, ".");
     py::module mdl = py::module::import("antplan.test_examples.test_antplan_example"); // Python file
-    mdl.attr("init_model")(model_path);
     py_cost_fn = mdl.attr(py_func_name.c_str());
     py_ready = true;
 }
@@ -93,6 +90,7 @@ void AntPlanHeuristic::mark_preferred_operators_and_relaxed_plan(
         }
     }
 }
+
 
 int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
     State state = convert_ancestor_state(ancestor_state);
@@ -152,9 +150,7 @@ static std::shared_ptr<Heuristic> _parse(OptionParser &parser) {
         "AntPlan heuristic",
         "Combines FF heuristic with anticipatory state evaluation using Python.");
     parser.add_option<std::string>(
-        "function", "Python function name");
-    parser.add_option<std::string>(
-        "model_path", "Path to the trained neural network model");
+        "function", "Python function name in antplan_model.py");
     Heuristic::add_options_to_parser(parser);
     Options opts = parser.parse();
     if (parser.dry_run())
