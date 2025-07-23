@@ -125,7 +125,7 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
         utils::g_log << "[AntPlan] Python function failed: " << e.what() << endl;
     }
 
-    int total_h = h_ff + anticipatory_cost;
+    int total_h = anticipatory_cost;
 
     // ✅ Debug Output
     utils::g_log << "\n[AntPlan] Current State Heuristic:" << endl;
