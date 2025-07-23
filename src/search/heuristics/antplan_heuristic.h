@@ -24,6 +24,7 @@ class AntPlanHeuristic : public additive_heuristic::AdditiveHeuristic {
     static py::object py_cost_fn;
     static bool py_ready;
     static std::string py_func_name;
+    static std::string model_path;
 
     void ensure_python_ready();
     void initialize_python_function(const std::string &func_name);
