@@ -98,17 +98,17 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
     if (h_add == DEAD_END)
         return h_add;
 
-    // FF part: compute h_FF and preferred operators
-    for (PropID goal_id : goal_propositions)
-        mark_preferred_operators_and_relaxed_plan(state, goal_id);
+    // // FF part: compute h_FF and preferred operators
+    // for (PropID goal_id : goal_propositions)
+    //     mark_preferred_operators_and_relaxed_plan(state, goal_id);
 
-    int h_ff = 0;
-    for (size_t op_no = 0; op_no < relaxed_plan.size(); ++op_no) {
-        if (relaxed_plan[op_no]) {
-            relaxed_plan[op_no] = false; // Reset
-            h_ff += task_proxy.get_operators()[op_no].get_cost();
-        }
-    }
+    // int h_ff = 0;
+    // for (size_t op_no = 0; op_no < relaxed_plan.size(); ++op_no) {
+    //     if (relaxed_plan[op_no]) {
+    //         relaxed_plan[op_no] = false; // Reset
+    //         h_ff += task_proxy.get_operators()[op_no].get_cost();
+    //     }
+    // }
 
     // ✅ Compute anticipatory cost for the current state
     std::map<std::string, std::string> state_map;
@@ -129,7 +129,7 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
 
     // ✅ Debug Output
     utils::g_log << "\n[AntPlan] Current State Heuristic:" << endl;
-    utils::g_log << "  h_FF = " << h_ff << endl;
+    // utils::g_log << "  h_FF = " << h_ff << endl;
     utils::g_log << "  anticipatory_cost = " << anticipatory_cost << endl;
     utils::g_log << "  total heuristic (h) = " << total_h << endl;
     utils::g_log << "  State facts:" << endl;
