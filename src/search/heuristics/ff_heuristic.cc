@@ -65,6 +65,7 @@ int FFHeuristic::compute_heuristic(const State &ancestor_state) {
             h_ff += task_proxy.get_operators()[op_no].get_cost();
         }
     }
+    utils::g_log << "  h_FF = " << h_ff << endl;
     return h_ff;
 }
 
