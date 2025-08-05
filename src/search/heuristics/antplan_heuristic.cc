@@ -94,9 +94,9 @@ void AntPlanHeuristic::mark_preferred_operators_and_relaxed_plan(
 
 int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
     State state = convert_ancestor_state(ancestor_state);
-    int h_add = compute_add_and_ff(state);
-    if (h_add == DEAD_END)
-        return h_add;
+    // int h_add = compute_add_and_ff(state);
+    // if (h_add == DEAD_END)
+    //     return h_add;
 
     // FF part: compute h_FF and preferred operators
     // for (PropID goal_id : goal_propositions)
