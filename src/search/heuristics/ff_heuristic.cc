@@ -65,7 +65,16 @@ int FFHeuristic::compute_heuristic(const State &ancestor_state) {
             h_ff += task_proxy.get_operators()[op_no].get_cost();
         }
     }
-    utils::g_log << "  h_FF = " << h_ff << endl;
+    utils::g_log << "  State facts:" << endl;
+
+    for (size_t var_id = 0; var_id < task_proxy.get_variables().size(); ++var_id) {
+        VariableProxy var = task_proxy.get_variables()[var_id];
+        FactProxy fact = state[var_id];
+        utils::g_log << "    " << var.get_name() << " = " << fact.get_name() << endl;
+    }
+    utils::g_log << "----------------------------------------" << endl;
+
+    utils::g_log << "  h_FF for this state = " << h_ff << endl;
     return h_ff;
 }
 
