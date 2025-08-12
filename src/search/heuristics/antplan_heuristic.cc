@@ -5,33 +5,57 @@
 #include "../task_proxy.h"
 #include "../task_utils/task_properties.h"
 #include "../utils/logging.h"
-#include <pybind11/stl.h> 
+
+#include <algorithm>
 #include <cassert>
 #include <map>
-#include <algorithm>
+#include <string>
+#include <utility>
+
+#include <pybind11/stl.h>
 
 namespace py = pybind11;
 using namespace std;
 
 namespace antplan_heuristic {
 
-// Static definitions
+// ===== Static definitions =====
 py::object AntPlanHeuristic::py_cost_fn;
 bool AntPlanHeuristic::py_ready = false;
 std::string AntPlanHeuristic::py_func_name = "anticipatory_cost_fn";
+std::string AntPlanHeuristic::py_module_name = "antplan.scripts.eval_antplan_gripper";
+std::string AntPlanHeuristic::py_file_path;
 
+// ===== ctor / dtor =====
 AntPlanHeuristic::AntPlanHeuristic(const options::Options &opts)
     : AdditiveHeuristic(opts),
       relaxed_plan(task_proxy.get_operators().size(), false) {
-    string func_name = opts.get<std::string>("function");
+
+    // required: function (name of Python function to call inside the module/file)
+    std::string func_name = opts.get<std::string>("function");
     initialize_python_function(func_name);
 
-    utils::g_log << "Initializing AntPlan heuristic with Python function: "
-                 << func_name << endl;
+    // optional: module or filepath; either can be provided
+    if (opts.contains("module"))
+        py_module_name = opts.get<std::string>("module");
+    if (opts.contains("filepath"))
+        py_file_path = opts.get<std::string>("filepath");
+
+    utils::g_log << "Initializing AntPlan heuristic\n"
+                 << "  function : " << py_func_name << "\n"
+                 << "  module   : " << (py_module_name.empty() ? "<none>" : py_module_name) << "\n"
+                 << "  filepath : " << (py_file_path.empty() ? "<none>" : py_file_path) << std::endl;
 }
 
 AntPlanHeuristic::~AntPlanHeuristic() {
-    // Do not finalize interpreter globally; FD may use it for other components.
+    // Do not finalize the interpreter here (FD or other components might share it).
+}
+
+// ===== helpers =====
+void AntPlanHeuristic::add_to_sys_path_front(const std::string &path) {
+    if (path.empty()) return;
+    py::module sys = py::module::import("sys");
+    sys.attr("path").attr("insert")(0, path);
 }
 
 void AntPlanHeuristic::initialize_python_function(const std::string &func_name) {
@@ -44,20 +68,63 @@ void AntPlanHeuristic::ensure_python_ready() {
     if (py_ready)
         return;
 
-    py::initialize_interpreter();
-    py::module sys = py::module::import("sys");
-    sys.attr("path").attr("insert")(0, ".");
-    py::module mdl = py::module::import("taskplan.scripts.demo_pddl"); // Python file
-    py_cost_fn = mdl.attr(py_func_name.c_str());
-    py_ready = true;
+    // Initialize interpreter if needed
+    if (!Py_IsInitialized()) {
+        py::initialize_interpreter();
+    }
+
+    // We support two ways to supply the code:
+    // 1) py_file_path: load a module from an explicit .py file
+    // 2) py_module_name: import by module name via sys.path
+    // If both are provided, filepath takes precedence.
+
+    try {
+        py::object mdl;
+
+        if (!py_file_path.empty()) {
+            // Load from an explicit file path using importlib
+            py::module importlib = py::module::import("importlib.util");
+            py::object spec_from_file_location = importlib.attr("spec_from_file_location");
+            py::object module_from_spec = py::module::import("importlib").attr("util").attr("module_from_spec");
+
+            // Pick a stable synthetic module name from file path
+            // (Python allows arbitrary names for file-based specs)
+            std::string synth_name = std::string("antplan_dynamic_") + std::to_string(std::hash<std::string>{}(py_file_path));
+
+            py::object spec = spec_from_file_location(synth_name.c_str(), py_file_path.c_str());
+            if (spec.is_none()) {
+                throw std::runtime_error("importlib.util.spec_from_file_location returned None");
+            }
+            py::object module = module_from_spec(spec);
+            spec.attr("loader").attr("exec_module")(module);
+            mdl = module;
+
+        } else {
+            // Import by module name; allow CWD first (like original)
+            add_to_sys_path_front(".");
+            mdl = py::module::import(py_module_name.c_str());
+        }
+
+        // Lookup the function by name
+        if (!py::hasattr(mdl, py_func_name.c_str())) {
+            throw std::runtime_error("Python object '" + py_func_name + "' not found in module");
+        }
+        py_cost_fn = mdl.attr(py_func_name.c_str());
+        py_ready = true;
+
+    } catch (const std::exception &e) {
+        utils::g_log << "[AntPlan] Failed to initialize Python: " << e.what() << std::endl;
+        // Keep py_ready=false to prevent calls; heuristic will return 0 then.
+    }
 }
 
-std::map<std::string, std::string> AntPlanHeuristic::convert_state_to_map(const State &state) {
+std::map<std::string, std::string>
+AntPlanHeuristic::convert_state_to_map(const State &state) {
     std::map<std::string, std::string> state_map;
     int num_vars = task_proxy.get_variables().size();
     for (int var_id = 0; var_id < num_vars; ++var_id) {
         VariableProxy var = task_proxy.get_variables()[var_id];
-        FactProxy fact = state[var_id]; // Access fact directly
+        FactProxy fact = state[var_id];
         state_map[var.get_name()] = fact.get_name();
     }
     return state_map;
@@ -91,72 +158,60 @@ void AntPlanHeuristic::mark_preferred_operators_and_relaxed_plan(
     }
 }
 
-
+// ===== main computation =====
 int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
     State state = convert_ancestor_state(ancestor_state);
-    // int h_add = compute_add_and_ff(state);
-    // if (h_add == DEAD_END)
-    //     return h_add;
 
-    // FF part: compute h_FF and preferred operators
-    // for (PropID goal_id : goal_propositions)
-    //     mark_preferred_operators_and_relaxed_plan(state, goal_id);
-
-    // int h_ff = 0;
-    // for (size_t op_no = 0; op_no < relaxed_plan.size(); ++op_no) {
-    //     if (relaxed_plan[op_no]) {
-    //         relaxed_plan[op_no] = false; // Reset
-    //         h_ff += task_proxy.get_operators()[op_no].get_cost();
-    //     }
-    // }
-
-    // ✅ Compute anticipatory cost for the current state
-    std::map<std::string, std::string> state_map;
-    for (size_t var_id = 0; var_id < task_proxy.get_variables().size(); ++var_id) {
-        VariableProxy var = task_proxy.get_variables()[var_id];
-        FactProxy fact = state[var_id];
-        state_map[var.get_name()] = fact.get_name();
-    }
+    // Build a simple { var_name -> fact_name } snapshot
+    std::map<std::string, std::string> state_map = convert_state_to_map(state);
 
     int anticipatory_cost = 0;
-    try {
-        anticipatory_cost = py_cost_fn(py::cast(state_map)).cast<int>();
-    } catch (const std::exception &e) {
-        utils::g_log << "[AntPlan] Python function failed: " << e.what() << endl;
+    if (py_ready) {
+        try {
+            anticipatory_cost = py_cost_fn(py::cast(state_map)).cast<int>();
+        } catch (const std::exception &e) {
+            utils::g_log << "[AntPlan] Python function failed: " << e.what() << std::endl;
+        }
+    } else {
+        utils::g_log << "[AntPlan] Python not ready; returning 0." << std::endl;
     }
 
-    int total_h = anticipatory_cost;
+    utils::g_log << "\n[AntPlan] Current State Heuristic:\n"
+                 << "  anticipatory_cost = " << anticipatory_cost << "\n";
 
-    // ✅ Debug Output
-    utils::g_log << "\n[AntPlan] Current State Heuristic:" << endl;
-    // utils::g_log << "  h_FF = " << h_ff << endl;
-    utils::g_log << "  anticipatory_cost = " << anticipatory_cost << endl;
-    // utils::g_log << "  total heuristic (h) = " << total_h << endl;
-    utils::g_log << "  State facts:" << endl;
-
-    // for (size_t var_id = 0; var_id < task_proxy.get_variables().size(); ++var_id) {
-    //     VariableProxy var = task_proxy.get_variables()[var_id];
-    //     FactProxy fact = state[var_id];
-    //     utils::g_log << "    " << var.get_name() << " = " << fact.get_name() << endl;
-    // }
-    // utils::g_log << "----------------------------------------" << endl;
-
-    return total_h;
+    return anticipatory_cost;
 }
 
-// Plugin integration
+// ===== plugin registration =====
 static std::shared_ptr<Heuristic> _parse(OptionParser &parser) {
     parser.document_synopsis(
         "AntPlan heuristic",
-        "Combines FF heuristic with anticipatory state evaluation using Python.");
+        "Evaluates a state with a Python cost function (anticipatory cost). "
+        "You can provide either a Python module name or a file path.");
+
+    // Name of the function to call; e.g., 'anticipatory_cost_fn'
     parser.add_option<std::string>(
-        "function", "Python function name in antplan_model.py");
+        "function",
+        "Python function name to call (attribute in module/file).");
+
+    // Either provide the module name...
+    parser.add_option<std::string>(
+        "module",
+        "Python module name to import (e.g., 'pkg.subpkg.module'). "
+        "Default: 'antplan.scripts.eval_antplan_gripper'.",
+        "antplan.scripts.eval_antplan_gripper");
+
+    // ...or provide a file path.
+    parser.add_option<std::string>(
+        "filepath",
+        "Absolute or relative path to a .py file to load (takes precedence over 'module').",
+        "");
+
     Heuristic::add_options_to_parser(parser);
     Options opts = parser.parse();
     if (parser.dry_run())
         return nullptr;
-    else
-        return std::make_shared<AntPlanHeuristic>(opts);
+    return std::make_shared<AntPlanHeuristic>(opts);
 }
 
 static Plugin<Evaluator> _plugin("antplan", _parse);
