@@ -23,17 +23,16 @@ class AntPlanHeuristic : public additive_heuristic::AdditiveHeuristic {
     using RelaxedPlan = std::vector<bool>;
     RelaxedPlan relaxed_plan;
 
-    // Python hook state (kept static to mirror your current pattern)
+    // Python integration (static to mirror your original design)
     static py::object py_cost_fn;
     static bool py_ready;
     static std::string py_func_name;
-    static std::string py_module_name; // e.g., "mypkg.myscript" or empty
-    static std::string py_file_path;   // e.g., "/abs/path/to/myscript.py" or empty
+    static std::string py_module_name; // module to import if filepath is empty
+    static std::string py_file_path;   // .py file path; takes precedence if set
 
     void initialize_python_function(const std::string &func_name);
     void ensure_python_ready();
 
-    // helpers
     static void add_to_sys_path_front(const std::string &path);
 
     std::map<std::string, std::string> convert_state_to_map(const State &state);

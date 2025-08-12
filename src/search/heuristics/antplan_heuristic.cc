@@ -23,6 +23,7 @@ namespace antplan_heuristic {
 py::object AntPlanHeuristic::py_cost_fn;
 bool AntPlanHeuristic::py_ready = false;
 std::string AntPlanHeuristic::py_func_name = "anticipatory_cost_fn";
+// default keeps backward-compat unless you override from CLI
 std::string AntPlanHeuristic::py_module_name = "antplan.scripts.eval_antplan_gripper";
 std::string AntPlanHeuristic::py_file_path;
 
@@ -31,24 +32,26 @@ AntPlanHeuristic::AntPlanHeuristic(const options::Options &opts)
     : AdditiveHeuristic(opts),
       relaxed_plan(task_proxy.get_operators().size(), false) {
 
-    // required: function (name of Python function to call inside the module/file)
+    // All three are optional (defaults set in parser)
     std::string func_name = opts.get<std::string>("function");
-    initialize_python_function(func_name);
+    std::string mod_name  = opts.get<std::string>("module");
+    std::string file_path = opts.get<std::string>("filepath");
 
-    // optional: module or filepath; either can be provided
-    if (opts.contains("module"))
-        py_module_name = opts.get<std::string>("module");
-    if (opts.contains("filepath"))
-        py_file_path = opts.get<std::string>("filepath");
+    py_func_name    = func_name;
+    py_module_name  = mod_name;
+    py_file_path    = file_path;
+    py_ready        = false;
 
     utils::g_log << "Initializing AntPlan heuristic\n"
                  << "  function : " << py_func_name << "\n"
                  << "  module   : " << (py_module_name.empty() ? "<none>" : py_module_name) << "\n"
                  << "  filepath : " << (py_file_path.empty() ? "<none>" : py_file_path) << std::endl;
+
+    ensure_python_ready();
 }
 
 AntPlanHeuristic::~AntPlanHeuristic() {
-    // Do not finalize the interpreter here (FD or other components might share it).
+    // Do not finalize interpreter here (other components might use it).
 }
 
 // ===== helpers =====
@@ -68,28 +71,24 @@ void AntPlanHeuristic::ensure_python_ready() {
     if (py_ready)
         return;
 
-    // Initialize interpreter if needed
     if (!Py_IsInitialized()) {
         py::initialize_interpreter();
     }
-
-    // We support two ways to supply the code:
-    // 1) py_file_path: load a module from an explicit .py file
-    // 2) py_module_name: import by module name via sys.path
-    // If both are provided, filepath takes precedence.
 
     try {
         py::object mdl;
 
         if (!py_file_path.empty()) {
-            // Load from an explicit file path using importlib
-            py::module importlib = py::module::import("importlib.util");
-            py::object spec_from_file_location = importlib.attr("spec_from_file_location");
-            py::object module_from_spec = py::module::import("importlib").attr("util").attr("module_from_spec");
+            // Load a module from an explicit .py file
+            py::module importlib_util = py::module::import("importlib.util");
+            py::module importlib      = py::module::import("importlib");
 
-            // Pick a stable synthetic module name from file path
-            // (Python allows arbitrary names for file-based specs)
-            std::string synth_name = std::string("antplan_dynamic_") + std::to_string(std::hash<std::string>{}(py_file_path));
+            py::object spec_from_file_location = importlib_util.attr("spec_from_file_location");
+            py::object module_from_spec        = importlib.attr("util").attr("module_from_spec");
+
+            // Stable synthetic module name derived from file path
+            std::string synth_name = std::string("antplan_dynamic_") +
+                                     std::to_string(std::hash<std::string>{}(py_file_path));
 
             py::object spec = spec_from_file_location(synth_name.c_str(), py_file_path.c_str());
             if (spec.is_none()) {
@@ -100,12 +99,14 @@ void AntPlanHeuristic::ensure_python_ready() {
             mdl = module;
 
         } else {
-            // Import by module name; allow CWD first (like original)
+            // Import by module name; keep CWD first like original behavior
             add_to_sys_path_front(".");
+            if (py_module_name.empty()) {
+                throw std::runtime_error("No module or filepath provided for AntPlan.");
+            }
             mdl = py::module::import(py_module_name.c_str());
         }
 
-        // Lookup the function by name
         if (!py::hasattr(mdl, py_func_name.c_str())) {
             throw std::runtime_error("Python object '" + py_func_name + "' not found in module");
         }
@@ -114,7 +115,7 @@ void AntPlanHeuristic::ensure_python_ready() {
 
     } catch (const std::exception &e) {
         utils::g_log << "[AntPlan] Failed to initialize Python: " << e.what() << std::endl;
-        // Keep py_ready=false to prevent calls; heuristic will return 0 then.
+        py_ready = false;
     }
 }
 
@@ -162,7 +163,7 @@ void AntPlanHeuristic::mark_preferred_operators_and_relaxed_plan(
 int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
     State state = convert_ancestor_state(ancestor_state);
 
-    // Build a simple { var_name -> fact_name } snapshot
+    // Build { var_name -> fact_name }
     std::map<std::string, std::string> state_map = convert_state_to_map(state);
 
     int anticipatory_cost = 0;
@@ -187,21 +188,20 @@ static std::shared_ptr<Heuristic> _parse(OptionParser &parser) {
     parser.document_synopsis(
         "AntPlan heuristic",
         "Evaluates a state with a Python cost function (anticipatory cost). "
-        "You can provide either a Python module name or a file path.");
+        "Provide either a Python module name or a file path. Both are optional; "
+        "if both are given, 'filepath' takes precedence.");
 
-    // Name of the function to call; e.g., 'anticipatory_cost_fn'
+    // All of these have defaults so FD won't require them.
     parser.add_option<std::string>(
         "function",
-        "Python function name to call (attribute in module/file).");
+        "Python function name to call (attribute in module/file).",
+        "anticipatory_cost_fn");
 
-    // Either provide the module name...
     parser.add_option<std::string>(
         "module",
-        "Python module name to import (e.g., 'pkg.subpkg.module'). "
-        "Default: 'antplan.scripts.eval_antplan_gripper'.",
+        "Python module name to import (e.g., 'pkg.subpkg.module').",
         "antplan.scripts.eval_antplan_gripper");
 
-    // ...or provide a file path.
     parser.add_option<std::string>(
         "filepath",
         "Absolute or relative path to a .py file to load (takes precedence over 'module').",
