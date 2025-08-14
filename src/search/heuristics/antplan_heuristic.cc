@@ -177,6 +177,14 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
         utils::g_log << "[AntPlan] Python not ready; returning 0." << std::endl;
     }
 
+    utils::g_log << "  State facts:" << endl;
+
+    for (size_t var_id = 0; var_id < task_proxy.get_variables().size(); ++var_id) {
+        VariableProxy var = task_proxy.get_variables()[var_id];
+        FactProxy fact = state[var_id];
+        utils::g_log << "    " << var.get_name() << " = " << fact.get_name() << endl;
+    }
+
     utils::g_log << "\n[AntPlan] Current State Heuristic:\n"
                  << "  anticipatory_cost = " << anticipatory_cost << "\n";
 
