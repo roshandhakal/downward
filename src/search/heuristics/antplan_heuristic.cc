@@ -60,12 +60,10 @@ void AntPlanHeuristic::ensure_python_ready() {
     if (py_ready)
         return;
 
-    // Interpreter must exist before acquiring GIL
     if (!Py_IsInitialized()) {
         py::initialize_interpreter();
     }
 
-    // Always hold the GIL when calling into Python
     py::gil_scoped_acquire gil;
 
     try {
@@ -73,25 +71,38 @@ void AntPlanHeuristic::ensure_python_ready() {
                      << " module=" << (py_module_name.empty() ? "<none>" : py_module_name)
                      << std::endl;
 
-        if (py_module_name.empty()) {
+        if (py_module_name.empty())
             throw std::runtime_error("No Python module provided for AntPlan.");
-        }
 
-        // Keep CWD on sys.path[0] so running from project root works,
-        // but do not accept any extra sys_path/filepath knobs.
         py::module sys = py::module::import("sys");
+
+        // Always keep CWD on path[0] to help when running from project root
         sys.attr("path").attr("insert")(0, ".");
 
-        // Import module by name only
+        // --- Diagnostics before import
+        utils::g_log << "[AntPlan][PyDiag] sys.version=" 
+                     << py::cast<std::string>(sys.attr("version")) << "\n";
+        utils::g_log << "[AntPlan][PyDiag] sys.executable=" 
+                     << py::cast<std::string>(sys.attr("executable")) << "\n";
+        utils::g_log << "[AntPlan][PyDiag] sys.prefix=" 
+                     << py::cast<std::string>(sys.attr("prefix")) << "\n";
+        utils::g_log << "[AntPlan][PyDiag] sys.base_prefix=" 
+                     << py::cast<std::string>(sys.attr("base_prefix")) << "\n";
+
+        py::list p = sys.attr("path");
+        utils::g_log << "[AntPlan][PyDiag] sys.path:\n";
+        for (ssize_t i = 0; i < py::len(p); ++i) {
+            utils::g_log << "  [" << i << "] " << py::cast<std::string>(p[i]) << "\n";
+        }
+        utils::g_log << std::flush;
+
+        // --- Import module by name only
         py::object mdl = py::module::import(py_module_name.c_str());
 
         if (!py::hasattr(mdl, py_func_name.c_str())) {
-            // Emit available attributes to help debugging
             py::list names = mdl.attr("__dict__").attr("keys")();
             std::string have;
-            for (auto &n : names) {
-                have += py::cast<std::string>(n) + " ";
-            }
+            for (auto &n : names) have += py::cast<std::string>(n) + " ";
             throw std::runtime_error(
                 "Python object '" + py_func_name + "' not found in module. Have: " + have);
         }
@@ -101,15 +112,26 @@ void AntPlanHeuristic::ensure_python_ready() {
         utils::g_log << "[AntPlan] Python ready.\n";
 
     } catch (const std::exception &e) {
-        // Print full Python traceback if available
         try {
-            py::object tb = py::module::import("traceback").attr("format_exc")();
+            py::object traceback = py::module::import("traceback").attr("format_exc")();
             utils::g_log << "[AntPlan] Failed to initialize Python: " << e.what() << "\n"
-                         << py::cast<std::string>(tb) << std::endl;
+                         << "[AntPlan][Traceback]\n" << py::cast<std::string>(traceback) << std::endl;
+
+            // Re-dump sys.path in the catch too, in case it changed
+            try {
+                py::module sys2 = py::module::import("sys");
+                py::list p2 = sys2.attr("path");
+                utils::g_log << "[AntPlan][PyDiag-after-fail] sys.path:\n";
+                for (ssize_t i = 0; i < py::len(p2); ++i) {
+                    utils::g_log << "  [" << i << "] " << py::cast<std::string>(p2[i]) << "\n";
+                }
+            } catch (...) {}
         } catch (...) {
             utils::g_log << "[AntPlan] Failed to initialize Python: " << e.what() << std::endl;
         }
         py_ready = false;
+        // Optional: uncomment to fail fast instead of silently returning 0 from compute_heuristic
+        // throw;
     }
 }
 
