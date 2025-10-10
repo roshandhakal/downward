@@ -91,7 +91,7 @@ void AntPlanHeuristic::ensure_python_ready() {
 
         py::list p = sys.attr("path");
         utils::g_log << "[AntPlan][PyDiag] sys.path:\n";
-        for (ssize_t i = 0; i < py::len(p); ++i) {
+        for (size_t i = 0; i < py::len(p); ++i) {
             utils::g_log << "  [" << i << "] " << py::cast<std::string>(p[i]) << "\n";
         }
         utils::g_log << std::flush;
@@ -122,7 +122,7 @@ void AntPlanHeuristic::ensure_python_ready() {
                 py::module sys2 = py::module::import("sys");
                 py::list p2 = sys2.attr("path");
                 utils::g_log << "[AntPlan][PyDiag-after-fail] sys.path:\n";
-                for (ssize_t i = 0; i < py::len(p2); ++i) {
+                for (size_t i = 0; i < py::len(p2); ++i) {
                     utils::g_log << "  [" << i << "] " << py::cast<std::string>(p2[i]) << "\n";
                 }
             } catch (...) {}
