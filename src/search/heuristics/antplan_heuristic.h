@@ -23,11 +23,11 @@ class AntPlanHeuristic : public additive_heuristic::AdditiveHeuristic {
     using RelaxedPlan = std::vector<bool>;
     RelaxedPlan relaxed_plan;
 
-    // Python integration (module-only)
+    // Python integration
     static py::object py_cost_fn;
     static bool py_ready;
-    static std::string py_func_name;     // Python function name (attribute)
-    static std::string py_module_name;   // Python module to import
+    static std::string py_func_name;
+    static std::string py_module_name;
 
     void initialize_python_function(const std::string &func_name);
     void ensure_python_ready();

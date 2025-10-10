@@ -5,12 +5,14 @@
 #include "../task_proxy.h"
 #include "../task_utils/task_properties.h"
 #include "../utils/logging.h"
+#include "../algorithms/priority_queues.h" // CORRECTED PATH BASED ON YOUR HINT
 
 #include <algorithm>
 #include <cassert>
 #include <map>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <pybind11/stl.h>
 
@@ -22,17 +24,16 @@ namespace antplan_heuristic {
 // ===== Static definitions =====
 py::object AntPlanHeuristic::py_cost_fn;
 bool AntPlanHeuristic::py_ready = false;
-std::string AntPlanHeuristic::py_func_name  = "anticipatory_cost_fn";
-std::string AntPlanHeuristic::py_module_name = "antplan.scripts.eval_antplan_gripper";
+string AntPlanHeuristic::py_func_name  = "anticipatory_cost_fn";
+string AntPlanHeuristic::py_module_name = "antplan.scripts.eval_antplan_gripper";
 
 // ===== ctor / dtor =====
 AntPlanHeuristic::AntPlanHeuristic(const options::Options &opts)
     : AdditiveHeuristic(opts),
       relaxed_plan(task_proxy.get_operators().size(), false) {
 
-    // Only two options: function + module
-    std::string func_name = opts.get<std::string>("function");
-    std::string mod_name  = opts.get<std::string>("module");
+    string func_name = opts.get<string>("function");
+    string mod_name  = opts.get<string>("module");
 
     py_func_name   = func_name;
     py_module_name = mod_name;
@@ -40,108 +41,50 @@ AntPlanHeuristic::AntPlanHeuristic(const options::Options &opts)
 
     utils::g_log << "[AntPlan] ctor: function=" << py_func_name
                  << " module=" << (py_module_name.empty() ? "<none>" : py_module_name)
-                 << std::endl;
+                 << endl;
 
     ensure_python_ready();
 }
 
 AntPlanHeuristic::~AntPlanHeuristic() {
-    // Do not finalize interpreter here (other components might use it).
 }
 
 // ===== helpers =====
-void AntPlanHeuristic::initialize_python_function(const std::string &func_name) {
+void AntPlanHeuristic::initialize_python_function(const string &func_name) {
     py_func_name = func_name;
     py_ready = false;
     ensure_python_ready();
 }
 
 void AntPlanHeuristic::ensure_python_ready() {
-    if (py_ready)
-        return;
-
-    if (!Py_IsInitialized()) {
-        py::initialize_interpreter();
-    }
-
+    if (py_ready) return;
+    if (!Py_IsInitialized()) py::initialize_interpreter();
     py::gil_scoped_acquire gil;
-
     try {
-        utils::g_log << "[AntPlan] ensure_python_ready: func=" << py_func_name
-                     << " module=" << (py_module_name.empty() ? "<none>" : py_module_name)
-                     << std::endl;
-
-        if (py_module_name.empty())
-            throw std::runtime_error("No Python module provided for AntPlan.");
-
-        py::module sys = py::module::import("sys");
-
-        // Always keep CWD on path[0] to help when running from project root
-        sys.attr("path").attr("insert")(0, ".");
-
-        // --- Diagnostics before import
-        utils::g_log << "[AntPlan][PyDiag] sys.version=" 
-                     << py::cast<std::string>(sys.attr("version")) << "\n";
-        utils::g_log << "[AntPlan][PyDiag] sys.executable=" 
-                     << py::cast<std::string>(sys.attr("executable")) << "\n";
-        utils::g_log << "[AntPlan][PyDiag] sys.prefix=" 
-                     << py::cast<std::string>(sys.attr("prefix")) << "\n";
-        utils::g_log << "[AntPlan][PyDiag] sys.base_prefix=" 
-                     << py::cast<std::string>(sys.attr("base_prefix")) << "\n";
-
-        py::list p = sys.attr("path");
-        utils::g_log << "[AntPlan][PyDiag] sys.path:\n";
-        for (ssize_t i = 0; i < py::len(p); ++i) {
-            utils::g_log << "  [" << i << "] " << py::cast<std::string>(p[i]) << "\n";
-        }
-        utils::g_log << std::flush;
-
-        // --- Import module by name only
+        if (py_module_name.empty()) throw runtime_error("No Python module provided for AntPlan.");
+        py::module::import("sys").attr("path").attr("insert")(0, ".");
         py::object mdl = py::module::import(py_module_name.c_str());
-
         if (!py::hasattr(mdl, py_func_name.c_str())) {
-            py::list names = mdl.attr("__dict__").attr("keys")();
-            std::string have;
-            for (auto &n : names) have += py::cast<std::string>(n) + " ";
-            throw std::runtime_error(
-                "Python object '" + py_func_name + "' not found in module. Have: " + have);
+            throw runtime_error("Python function '" + py_func_name + "' not found in module.");
         }
-
         py_cost_fn = mdl.attr(py_func_name.c_str());
         py_ready = true;
-        utils::g_log << "[AntPlan] Python ready.\n";
-
-    } catch (const std::exception &e) {
-        try {
+        utils::g_log << "[AntPlan] Python ready." << endl;
+    } catch (const exception &e) {
+        utils::g_log << "[AntPlan] Failed to initialize Python: " << e.what() << endl;
+        if (PyErr_Occurred()) {
             py::object traceback = py::module::import("traceback").attr("format_exc")();
-            utils::g_log << "[AntPlan] Failed to initialize Python: " << e.what() << "\n"
-                         << "[AntPlan][Traceback]\n" << py::cast<std::string>(traceback) << std::endl;
-
-            // Re-dump sys.path in the catch too, in case it changed
-            try {
-                py::module sys2 = py::module::import("sys");
-                py::list p2 = sys2.attr("path");
-                utils::g_log << "[AntPlan][PyDiag-after-fail] sys.path:\n";
-                for (ssize_t i = 0; i < py::len(p2); ++i) {
-                    utils::g_log << "  [" << i << "] " << py::cast<std::string>(p2[i]) << "\n";
-                }
-            } catch (...) {}
-        } catch (...) {
-            utils::g_log << "[AntPlan] Failed to initialize Python: " << e.what() << std::endl;
+            utils::g_log << "[AntPlan][Traceback]\n" << py::cast<string>(traceback) << endl;
         }
         py_ready = false;
-        // Optional: uncomment to fail fast instead of silently returning 0 from compute_heuristic
-        // throw;
+        throw;
     }
 }
 
-std::map<std::string, std::string>
-AntPlanHeuristic::convert_state_to_map(const State &state) {
-    std::map<std::string, std::string> state_map;
-    int num_vars = task_proxy.get_variables().size();
-    for (int var_id = 0; var_id < num_vars; ++var_id) {
-        VariableProxy var = task_proxy.get_variables()[var_id];
-        FactProxy fact = state[var_id];
+map<string, string> AntPlanHeuristic::convert_state_to_map(const State &state) {
+    map<string, string> state_map;
+    for (VariableProxy var : task_proxy.get_variables()) {
+        FactProxy fact = state[var];
         state_map[var.get_name()] = fact.get_name();
     }
     return state_map;
@@ -175,70 +118,130 @@ void AntPlanHeuristic::mark_preferred_operators_and_relaxed_plan(
     }
 }
 
-// ===== main computation =====
+
+// ===== Main Computation =====
 int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
     State state = convert_ancestor_state(ancestor_state);
-    std::map<std::string, std::string> state_map = convert_state_to_map(state);
 
-    int anticipatory_cost = 0;
+    // *** 1. COMPUTE h_max LOCALLY ***
+    int h_max = 0;
+    priority_queues::AdaptiveQueue<PropID> max_queue;
 
-    if (py_ready) {
-        try {
-            py::gil_scoped_acquire gil;  // hold GIL during Python call
-            anticipatory_cost = py_cost_fn(py::cast(state_map)).cast<int>();
-        } catch (const std::exception &e) {
-            // Try to dump traceback too
-            try {
-                py::gil_scoped_acquire gil2;
-                py::object tb = py::module::import("traceback").attr("format_exc")();
-                utils::g_log << "[AntPlan] Python function failed: " << e.what() << "\n"
-                             << py::cast<std::string>(tb) << std::endl;
-            } catch (...) {
-                utils::g_log << "[AntPlan] Python function failed: " << e.what() << std::endl;
+    auto enqueue_if_necessary = [&](PropID prop_id, int cost) {
+        Proposition *prop = get_proposition(prop_id);
+        if (prop->cost == -1 || prop->cost > cost) {
+            prop->cost = cost;
+            max_queue.push(cost, prop_id);
+        }
+    };
+
+    for (Proposition &prop : propositions) {
+        prop.cost = -1;
+    }
+    for (UnaryOperator &op : unary_operators) {
+        op.unsatisfied_preconditions = op.num_preconditions;
+        op.cost = op.base_cost;
+        if (op.unsatisfied_preconditions == 0) {
+            enqueue_if_necessary(op.effect, op.base_cost);
+        }
+    }
+
+    for (FactProxy fact : state) {
+        PropID init_prop = get_prop_id(fact);
+        enqueue_if_necessary(init_prop, 0);
+    }
+
+    while (!max_queue.empty()) {
+        pair<int, PropID> top_pair = max_queue.pop();
+        int distance = top_pair.first;
+        PropID prop_id = top_pair.second;
+        int prop_cost = get_proposition(prop_id)->cost;
+
+        if (prop_cost < distance) {
+            continue;
+        }
+        for (OpID op_id : precondition_of_pool.get_slice(
+                 get_proposition(prop_id)->precondition_of,
+                 get_proposition(prop_id)->num_precondition_occurences)) {
+            UnaryOperator *op = get_operator(op_id);
+            op->cost = max(op->cost, op->base_cost + prop_cost);
+            --op->unsatisfied_preconditions;
+            if (op->unsatisfied_preconditions == 0) {
+                enqueue_if_necessary(op->effect, op->cost);
             }
         }
+    }
+
+    for (PropID goal_id : goal_propositions) {
+        int goal_cost = get_proposition(goal_id)->cost;
+        if (goal_cost == -1) return DEAD_END;
+        h_max = max(h_max, goal_cost);
+    }
+
+    // *** 2. COMPUTE h_ff (and h_add) ***
+    int h_add = compute_add_and_ff(state);
+    if (h_add == DEAD_END) {
+        return DEAD_END;
+    }
+    for (PropID goal_id : goal_propositions) {
+        mark_preferred_operators_and_relaxed_plan(state, goal_id);
+    }
+    int h_ff = 0;
+    for (size_t op_no = 0; op_no < relaxed_plan.size(); ++op_no) {
+        if (relaxed_plan[op_no]) {
+            relaxed_plan[op_no] = false;
+            h_ff += task_proxy.get_operators()[op_no].get_cost();
+        }
+    }
+
+    // *** 3. PREPARE DATA AND CALL PYTHON ***
+    map<string, string> state_map = convert_state_to_map(state);
+    state_map["__h_ff__"] = to_string(h_ff);
+    state_map["__h_max__"] = to_string(h_max);
+    state_map["__h_add__"] = to_string(h_add);
+
+    int final_heuristic_value = 0;
+    if (py_ready) {
+        try {
+            py::gil_scoped_acquire gil;
+            final_heuristic_value = py_cost_fn(py::cast(state_map)).cast<int>();
+        } catch (const exception &e) {
+            utils::g_log << "[AntPlan] Python function failed: " << e.what() << endl;
+            if (PyErr_Occurred()) {
+                py::object tb = py::module::import("traceback").attr("format_exc")();
+                utils::g_log << py::cast<string>(tb) << endl;
+            }
+            return DEAD_END;
+        }
     } else {
-        utils::g_log << "[AntPlan] Python not ready; returning 0." << std::endl;
+        utils::g_log << "[AntPlan] Python not ready; cannot compute." << endl;
+        return DEAD_END;
     }
 
-    utils::g_log << "  State facts:" << endl;
-
-    for (size_t var_id = 0; var_id < task_proxy.get_variables().size(); ++var_id) {
-        VariableProxy var = task_proxy.get_variables()[var_id];
-        FactProxy fact = state[var_id];
-        utils::g_log << "    " << var.get_name() << " = " << fact.get_name() << endl;
-    }
-    
-    utils::g_log << "----------------------------------------" << endl;
-    utils::g_log << "\n[AntPlan] Current State Heuristic:\n"
-                 << "  anticipatory_cost = " << anticipatory_cost << "\n";
-
-    return anticipatory_cost;
+    return (final_heuristic_value < 0) ? DEAD_END : final_heuristic_value;
 }
 
 // ===== plugin registration =====
-static std::shared_ptr<Heuristic> _parse(OptionParser &parser) {
+static shared_ptr<Heuristic> _parse(options::OptionParser &parser) {
     parser.document_synopsis(
         "AntPlan heuristic",
-        "Evaluates a state with a Python cost function (anticipatory cost). "
-        "Imports strictly by Python module name and looks up a function.");
+        "Computes h_ff and h_max internally and passes them to a Python cost function.");
 
-    // Only these two options remain.
-    parser.add_option<std::string>(
+    parser.add_option<string>(
         "function",
-        "Python function name to call (attribute in module).",
-        "anticipatory_cost_fn");
+        "Python function name to call.",
+        "distance_based_probabilistic");
 
-    parser.add_option<std::string>(
+    parser.add_option<string>(
         "module",
-        "Python module name to import (e.g., 'pkg.subpkg.module').",
-        "antplan.scripts.eval_antplan_gripper");
+        "Python module to import.",
+        "");
 
     Heuristic::add_options_to_parser(parser);
-    Options opts = parser.parse();
+    options::Options opts = parser.parse();
     if (parser.dry_run())
         return nullptr;
-    return std::make_shared<AntPlanHeuristic>(opts);
+    return make_shared<AntPlanHeuristic>(opts);
 }
 
 static Plugin<Evaluator> _plugin("antplan", _parse);
