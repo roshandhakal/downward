@@ -5,7 +5,7 @@
 #include "../task_proxy.h"
 #include "../task_utils/task_properties.h"
 #include "../utils/logging.h"
-#include "../algorithms/priority_queues.h" // CORRECTED PATH BASED ON YOUR HINT
+#include "../algorithms/priority_queues.h"
 
 #include <algorithm>
 #include <cassert>
@@ -24,32 +24,32 @@ namespace antplan_heuristic {
 // ===== Static definitions =====
 py::object AntPlanHeuristic::py_cost_fn;
 bool AntPlanHeuristic::py_ready = false;
-string AntPlanHeuristic::py_func_name  = "anticipatory_cost_fn";
-string AntPlanHeuristic::py_module_name = "antplan.scripts.eval_antplan_gripper";
+string AntPlanHeuristic::py_func_name;
+string AntPlanHeuristic::py_module_name;
 
 // ===== ctor / dtor =====
 AntPlanHeuristic::AntPlanHeuristic(const options::Options &opts)
     : AdditiveHeuristic(opts),
       relaxed_plan(task_proxy.get_operators().size(), false) {
+    
+    // Store which heuristics to compute from options
+    compute_ff = opts.get<bool>("compute_ff");
+    compute_hmax = opts.get<bool>("compute_hmax");
 
-    string func_name = opts.get<string>("function");
-    string mod_name  = opts.get<string>("module");
+    if (!compute_ff && !compute_hmax) {
+        throw std::runtime_error("AntPlanHeuristic must be configured to compute at least one base heuristic (compute_ff or compute_hmax).");
+    }
 
-    py_func_name   = func_name;
-    py_module_name = mod_name;
+    // Python options
+    py_func_name   = opts.get<string>("function");
+    py_module_name = opts.get<string>("module");
     py_ready       = false;
-
-    utils::g_log << "[AntPlan] ctor: function=" << py_func_name
-                 << " module=" << (py_module_name.empty() ? "<none>" : py_module_name)
-                 << endl;
 
     ensure_python_ready();
 }
 
-AntPlanHeuristic::~AntPlanHeuristic() {
-}
+AntPlanHeuristic::~AntPlanHeuristic() {}
 
-// ===== helpers =====
 void AntPlanHeuristic::initialize_python_function(const string &func_name) {
     py_func_name = func_name;
     py_ready = false;
@@ -90,8 +90,7 @@ map<string, string> AntPlanHeuristic::convert_state_to_map(const State &state) {
     return state_map;
 }
 
-void AntPlanHeuristic::mark_preferred_operators_and_relaxed_plan(
-    const State &state, PropID goal_id) {
+void AntPlanHeuristic::mark_preferred_operators_and_relaxed_plan(const State &state, PropID goal_id) {
     Proposition *goal = get_proposition(goal_id);
     if (!goal->marked) {
         goal->marked = true;
@@ -118,88 +117,78 @@ void AntPlanHeuristic::mark_preferred_operators_and_relaxed_plan(
     }
 }
 
-
 // ===== Main Computation =====
 int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
     State state = convert_ancestor_state(ancestor_state);
+    map<string, string> state_map = convert_state_to_map(state);
 
-    // *** 1. COMPUTE h_max LOCALLY ***
-    int h_max = 0;
-    priority_queues::AdaptiveQueue<PropID> max_queue;
+    if (compute_hmax) {
+        int h_max = 0;
+        priority_queues::AdaptiveQueue<PropID> max_queue;
 
-    auto enqueue_if_necessary = [&](PropID prop_id, int cost) {
-        Proposition *prop = get_proposition(prop_id);
-        if (prop->cost == -1 || prop->cost > cost) {
-            prop->cost = cost;
-            max_queue.push(cost, prop_id);
-        }
-    };
+        auto enqueue_if_necessary = [&](PropID prop_id, int cost) {
+            Proposition *prop = get_proposition(prop_id);
+            if (prop->cost == -1 || prop->cost > cost) {
+                prop->cost = cost;
+                max_queue.push(cost, prop_id);
+            }
+        };
 
-    for (Proposition &prop : propositions) {
-        prop.cost = -1;
-    }
-    for (UnaryOperator &op : unary_operators) {
-        op.unsatisfied_preconditions = op.num_preconditions;
-        op.cost = op.base_cost;
-        if (op.unsatisfied_preconditions == 0) {
-            enqueue_if_necessary(op.effect, op.base_cost);
-        }
-    }
-
-    for (FactProxy fact : state) {
-        PropID init_prop = get_prop_id(fact);
-        enqueue_if_necessary(init_prop, 0);
-    }
-
-    while (!max_queue.empty()) {
-        pair<int, PropID> top_pair = max_queue.pop();
-        int distance = top_pair.first;
-        PropID prop_id = top_pair.second;
-        int prop_cost = get_proposition(prop_id)->cost;
-
-        if (prop_cost < distance) {
-            continue;
-        }
-        for (OpID op_id : precondition_of_pool.get_slice(
-                 get_proposition(prop_id)->precondition_of,
-                 get_proposition(prop_id)->num_precondition_occurences)) {
-            UnaryOperator *op = get_operator(op_id);
-            op->cost = max(op->cost, op->base_cost + prop_cost);
-            --op->unsatisfied_preconditions;
-            if (op->unsatisfied_preconditions == 0) {
-                enqueue_if_necessary(op->effect, op->cost);
+        for (Proposition &prop : propositions) { prop.cost = -1; }
+        for (UnaryOperator &op : unary_operators) {
+            op.unsatisfied_preconditions = op.num_preconditions;
+            op.cost = op.base_cost;
+            if (op.unsatisfied_preconditions == 0) {
+                enqueue_if_necessary(op.effect, op.base_cost);
             }
         }
-    }
+        for (FactProxy fact : state) { enqueue_if_necessary(get_prop_id(fact), 0); }
 
-    for (PropID goal_id : goal_propositions) {
-        int goal_cost = get_proposition(goal_id)->cost;
-        if (goal_cost == -1) return DEAD_END;
-        h_max = max(h_max, goal_cost);
-    }
+        while (!max_queue.empty()) {
+            pair<int, PropID> top_pair = max_queue.pop();
+            int distance = top_pair.first;
+            PropID prop_id = top_pair.second;
+            int prop_cost = get_proposition(prop_id)->cost;
+            if (prop_cost < distance) continue;
 
-    // *** 2. COMPUTE h_ff (and h_add) ***
-    int h_add = compute_add_and_ff(state);
-    if (h_add == DEAD_END) {
-        return DEAD_END;
-    }
-    for (PropID goal_id : goal_propositions) {
-        mark_preferred_operators_and_relaxed_plan(state, goal_id);
-    }
-    int h_ff = 0;
-    for (size_t op_no = 0; op_no < relaxed_plan.size(); ++op_no) {
-        if (relaxed_plan[op_no]) {
-            relaxed_plan[op_no] = false;
-            h_ff += task_proxy.get_operators()[op_no].get_cost();
+            for (OpID op_id : precondition_of_pool.get_slice(
+                 get_proposition(prop_id)->precondition_of,
+                 get_proposition(prop_id)->num_precondition_occurences)) {
+                UnaryOperator *op = get_operator(op_id);
+                op->cost = max(op->cost, op->base_cost + prop_cost);
+                --op->unsatisfied_preconditions;
+                if (op->unsatisfied_preconditions == 0) {
+                    enqueue_if_necessary(op->effect, op->cost);
+                }
+            }
         }
+        for (PropID goal_id : goal_propositions) {
+            int goal_cost = get_proposition(goal_id)->cost;
+            if (goal_cost == -1) return DEAD_END;
+            h_max = max(h_max, goal_cost);
+        }
+        state_map["__h_max__"] = to_string(h_max);
     }
 
-    // *** 3. PREPARE DATA AND CALL PYTHON ***
-    map<string, string> state_map = convert_state_to_map(state);
-    state_map["__h_ff__"] = to_string(h_ff);
-    state_map["__h_max__"] = to_string(h_max);
-    state_map["__h_add__"] = to_string(h_add);
-
+    if (compute_ff) {
+        int h_add = compute_add_and_ff(state);
+        if (h_add == DEAD_END) return DEAD_END;
+        
+        state_map["__h_add__"] = to_string(h_add); // Pass h_add since it's free
+        
+        for (PropID goal_id : goal_propositions) {
+            mark_preferred_operators_and_relaxed_plan(state, goal_id);
+        }
+        int h_ff = 0;
+        for (size_t op_no = 0; op_no < relaxed_plan.size(); ++op_no) {
+            if (relaxed_plan[op_no]) {
+                relaxed_plan[op_no] = false;
+                h_ff += task_proxy.get_operators()[op_no].get_cost();
+            }
+        }
+        state_map["__h_ff__"] = to_string(h_ff);
+    }
+    
     int final_heuristic_value = 0;
     if (py_ready) {
         try {
@@ -217,7 +206,6 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
         utils::g_log << "[AntPlan] Python not ready; cannot compute." << endl;
         return DEAD_END;
     }
-
     return (final_heuristic_value < 0) ? DEAD_END : final_heuristic_value;
 }
 
@@ -225,17 +213,14 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
 static shared_ptr<Heuristic> _parse(options::OptionParser &parser) {
     parser.document_synopsis(
         "AntPlan heuristic",
-        "Computes h_ff and h_max internally and passes them to a Python cost function.");
+        "Computes selected base heuristics and passes them to a Python cost function.");
 
-    parser.add_option<string>(
-        "function",
-        "Python function name to call.",
-        "distance_based_probabilistic");
-
-    parser.add_option<string>(
-        "module",
-        "Python module to import.",
-        "");
+    parser.add_option<string>("function", "Python function name to call.", "distance_based_probabilistic");
+    parser.add_option<string>("module", "Python module to import.", "");
+    
+    // Add the boolean flags to control heuristic computation
+    parser.add_option<bool>("compute_ff", "Set to true to compute and pass h_ff.", "false");
+    parser.add_option<bool>("compute_hmax", "Set to true to compute and pass h_max.", "false");
 
     Heuristic::add_options_to_parser(parser);
     options::Options opts = parser.parse();

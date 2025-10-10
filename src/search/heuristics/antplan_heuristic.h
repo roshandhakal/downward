@@ -23,6 +23,10 @@ class AntPlanHeuristic : public additive_heuristic::AdditiveHeuristic {
     using RelaxedPlan = std::vector<bool>;
     RelaxedPlan relaxed_plan;
 
+    // Flags to control which heuristics are computed
+    bool compute_ff;
+    bool compute_hmax;
+
     // Python integration
     static py::object py_cost_fn;
     static bool py_ready;
