@@ -8,7 +8,6 @@
 
 #include <algorithm>
 #include <cassert>
-#include <limits>
 #include <map>
 #include <string>
 #include <utility>
@@ -80,14 +79,30 @@ void AntPlanHeuristic::ensure_python_ready() {
         // Always keep CWD on path[0] to help when running from project root
         sys.attr("path").attr("insert")(0, ".");
 
+        // // --- Diagnostics before import
+        // utils::g_log << "[AntPlan][PyDiag] sys.version=" 
+        //              << py::cast<std::string>(sys.attr("version")) << "\n";
+        // utils::g_log << "[AntPlan][PyDiag] sys.executable=" 
+        //              << py::cast<std::string>(sys.attr("executable")) << "\n";
+        // utils::g_log << "[AntPlan][PyDiag] sys.prefix=" 
+        //              << py::cast<std::string>(sys.attr("prefix")) << "\n";
+        // utils::g_log << "[AntPlan][PyDiag] sys.base_prefix=" 
+        //              << py::cast<std::string>(sys.attr("base_prefix")) << "\n";
+
+        // py::list p = sys.attr("path");
+        // utils::g_log << "[AntPlan][PyDiag] sys.path:\n";
+        // for (size_t i = 0; i < py::len(p); ++i) {
+        //     utils::g_log << "  [" << i << "] " << py::cast<std::string>(p[i]) << "\n";
+        // }
+        // utils::g_log << std::flush;
+
         // --- Import module by name only
         py::object mdl = py::module::import(py_module_name.c_str());
 
         if (!py::hasattr(mdl, py_func_name.c_str())) {
             py::list names = mdl.attr("__dict__").attr("keys")();
             std::string have;
-            for (auto &n : names)
-                have += py::cast<std::string>(n) + " ";
+            for (auto &n : names) have += py::cast<std::string>(n) + " ";
             throw std::runtime_error(
                 "Python object '" + py_func_name + "' not found in module. Have: " + have);
         }
@@ -110,8 +125,7 @@ void AntPlanHeuristic::ensure_python_ready() {
                 for (size_t i = 0; i < py::len(p2); ++i) {
                     utils::g_log << "  [" << i << "] " << py::cast<std::string>(p2[i]) << "\n";
                 }
-            } catch (...) {
-            }
+            } catch (...) {}
         } catch (...) {
             utils::g_log << "[AntPlan] Failed to initialize Python: " << e.what() << std::endl;
         }
@@ -161,57 +175,6 @@ void AntPlanHeuristic::mark_preferred_operators_and_relaxed_plan(
     }
 }
 
-// === NEW: choose preferred ops by min NN cost on successor symbolic states ===
-// Assumes GIL is already held by the caller.
-void AntPlanHeuristic::mark_preferred_by_successor_cost(const State &state) {
-    // Collect applicable operators in this state
-    std::vector<OperatorProxy> applicable_ops;
-    for (OperatorProxy op : task_proxy.get_operators()) {
-        if (task_properties::is_applicable(op, state)) {
-            applicable_ops.push_back(op);
-        }
-    }
-    if (applicable_ops.empty())
-        return;
-
-    // Base symbolic map for the current state
-    std::map<std::string, std::string> base_map = convert_state_to_map(state);
-
-    int best_cost = std::numeric_limits<int>::max();
-    std::vector<OperatorProxy> best_ops;
-
-    for (const OperatorProxy &op : applicable_ops) {
-        // Build successor symbolic map by applying op's effects
-        std::map<std::string, std::string> succ_map = base_map;
-        for (EffectProxy eff : op.get_effects()) {
-            FactProxy fact = eff.get_fact();
-            VariableProxy var = fact.get_variable();
-            succ_map[var.get_name()] = fact.get_name();
-        }
-
-        int succ_cost = 0;
-        try {
-            succ_cost = py_cost_fn(py::cast(succ_map)).cast<int>();
-        } catch (const std::exception &) {
-            // If NN fails on this successor, skip it
-            continue;
-        }
-
-        if (succ_cost < best_cost) {
-            best_cost = succ_cost;
-            best_ops.clear();
-            best_ops.push_back(op);
-        } else if (succ_cost == best_cost) {
-            best_ops.push_back(op);
-        }
-    }
-
-    // Mark all best operators as preferred
-    for (const OperatorProxy &op : best_ops) {
-        set_preferred(op);
-    }
-}
-
 // ===== main computation =====
 int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
     State state = convert_ancestor_state(ancestor_state);
@@ -221,15 +184,8 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
 
     if (py_ready) {
         try {
-            // Hold GIL for current-state + successor evaluations
-            py::gil_scoped_acquire gil;  // hold GIL during Python calls
-
-            // 1) NN cost for current state (heuristic value)
+            py::gil_scoped_acquire gil;  // hold GIL during Python call
             anticipatory_cost = py_cost_fn(py::cast(state_map)).cast<int>();
-
-            // 2) Preferred operators: those whose successor has min NN cost
-            mark_preferred_by_successor_cost(state);
-
         } catch (const std::exception &e) {
             // Try to dump traceback too
             try {
@@ -245,6 +201,18 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
         utils::g_log << "[AntPlan] Python not ready; returning 0." << std::endl;
     }
 
+    utils::g_log << "  State facts:" << endl;
+
+    for (size_t var_id = 0; var_id < task_proxy.get_variables().size(); ++var_id) {
+        VariableProxy var = task_proxy.get_variables()[var_id];
+        FactProxy fact = state[var_id];
+        utils::g_log << "    " << var.get_name() << " = " << fact.get_name() << endl;
+    }
+    
+    utils::g_log << "----------------------------------------" << endl;
+    utils::g_log << "\n[AntPlan] Current State Heuristic:\n"
+                 << "  anticipatory_cost = " << anticipatory_cost << "\n";
+
     return anticipatory_cost;
 }
 
@@ -253,9 +221,7 @@ static std::shared_ptr<Heuristic> _parse(OptionParser &parser) {
     parser.document_synopsis(
         "AntPlan heuristic",
         "Evaluates a state with a Python cost function (anticipatory cost). "
-        "Imports strictly by Python module name and looks up a function. "
-        "Preferred operators are those whose successor symbolic states "
-        "minimize the same anticipatory NN cost.");
+        "Imports strictly by Python module name and looks up a function.");
 
     // Only these two options remain.
     parser.add_option<std::string>(

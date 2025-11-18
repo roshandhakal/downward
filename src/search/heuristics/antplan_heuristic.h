@@ -29,20 +29,11 @@ class AntPlanHeuristic : public additive_heuristic::AdditiveHeuristic {
     static std::string py_func_name;     // Python function name (attribute)
     static std::string py_module_name;   // Python module to import
 
-    // Python helpers
     void initialize_python_function(const std::string &func_name);
     void ensure_python_ready();
 
-    // Convert SAS+ state into a string->string map for Python
     std::map<std::string, std::string> convert_state_to_map(const State &state);
-
-    // Existing relaxed-plan logic (kept if you ever want it)
     void mark_preferred_operators_and_relaxed_plan(const State &state, PropID goal_id);
-
-    // === NEW: AntPlan-specific preferred operators ===
-    // Use NN cost on *successor* symbolic states to choose preferred operators.
-    // Assumes GIL is already held when this is called.
-    void mark_preferred_by_successor_cost(const State &state);
 
 protected:
     int compute_heuristic(const State &ancestor_state) override;
