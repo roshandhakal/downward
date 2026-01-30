@@ -114,8 +114,8 @@ void AntPlanHeuristic::ensure_python_ready() {
     } catch (const std::exception &e) {
         try {
             py::object traceback = py::module::import("traceback").attr("format_exc")();
-            // utils::g_log << "[AntPlan] Failed to initialize Python: " << e.what() << "\n"
-            //              << "[AntPlan][Traceback]\n" << py::cast<std::string>(traceback) << std::endl;
+            utils::g_log << "[AntPlan] Failed to initialize Python: " << e.what() << "\n"
+                         << "[AntPlan][Traceback]\n" << py::cast<std::string>(traceback) << std::endl;
 
             // Re-dump sys.path in the catch too, in case it changed
             try {
