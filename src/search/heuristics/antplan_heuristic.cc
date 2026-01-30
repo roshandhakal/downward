@@ -131,7 +131,7 @@ void AntPlanHeuristic::ensure_python_ready() {
         }
         py_ready = false;
         // Optional: uncomment to fail fast instead of silently returning 0 from compute_heuristic
-        // throw;
+        throw;
     }
 }
 
