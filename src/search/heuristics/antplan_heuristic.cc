@@ -80,21 +80,21 @@ void AntPlanHeuristic::ensure_python_ready() {
         sys.attr("path").attr("insert")(0, ".");
 
         // // --- Diagnostics before import
-        // utils::g_log << "[AntPlan][PyDiag] sys.version=" 
-        //              << py::cast<std::string>(sys.attr("version")) << "\n";
-        // utils::g_log << "[AntPlan][PyDiag] sys.executable=" 
-        //              << py::cast<std::string>(sys.attr("executable")) << "\n";
-        // utils::g_log << "[AntPlan][PyDiag] sys.prefix=" 
-        //              << py::cast<std::string>(sys.attr("prefix")) << "\n";
-        // utils::g_log << "[AntPlan][PyDiag] sys.base_prefix=" 
-        //              << py::cast<std::string>(sys.attr("base_prefix")) << "\n";
+        utils::g_log << "[AntPlan][PyDiag] sys.version=" 
+                     << py::cast<std::string>(sys.attr("version")) << "\n";
+        utils::g_log << "[AntPlan][PyDiag] sys.executable=" 
+                     << py::cast<std::string>(sys.attr("executable")) << "\n";
+        utils::g_log << "[AntPlan][PyDiag] sys.prefix=" 
+                     << py::cast<std::string>(sys.attr("prefix")) << "\n";
+        utils::g_log << "[AntPlan][PyDiag] sys.base_prefix=" 
+                     << py::cast<std::string>(sys.attr("base_prefix")) << "\n";
 
-        // py::list p = sys.attr("path");
-        // utils::g_log << "[AntPlan][PyDiag] sys.path:\n";
-        // for (size_t i = 0; i < py::len(p); ++i) {
-        //     utils::g_log << "  [" << i << "] " << py::cast<std::string>(p[i]) << "\n";
-        // }
-        // utils::g_log << std::flush;
+        py::list p = sys.attr("path");
+        utils::g_log << "[AntPlan][PyDiag] sys.path:\n";
+        for (size_t i = 0; i < py::len(p); ++i) {
+            utils::g_log << "  [" << i << "] " << py::cast<std::string>(p[i]) << "\n";
+        }
+        utils::g_log << std::flush;
 
         // --- Import module by name only
         py::object mdl = py::module::import(py_module_name.c_str());
