@@ -1,48 +1,59 @@
-#ifndef HEURISTICS_ANTPLAN_HEURISTIC_H
-#define HEURISTICS_ANTPLAN_HEURISTIC_H
+#ifndef ANTPLAN_HEURISTIC_H
+#define ANTPLAN_HEURISTIC_H
 
-#include "additive_heuristic.h"
-#include "../task_proxy.h"
-
-#include <map>
-#include <string>
-#include <vector>
+#include "../heuristics/additive_heuristic.h"
 
 #include <pybind11/embed.h>
+#include <pybind11/pybind11.h>
+
+#include <string>
+#include <unordered_set>
+#include <cstdint>
 
 namespace py = pybind11;
 
 namespace antplan_heuristic {
-using relaxation_heuristic::NO_OP;
-using relaxation_heuristic::OpID;
-using relaxation_heuristic::PropID;
-using relaxation_heuristic::Proposition;
-using relaxation_heuristic::UnaryOperator;
 
 class AntPlanHeuristic : public additive_heuristic::AdditiveHeuristic {
-    using RelaxedPlan = std::vector<bool>;
-    RelaxedPlan relaxed_plan;
-
-    // Python integration (module-only)
+private:
+    // Python function info
     static py::object py_cost_fn;
     static bool py_ready;
-    static std::string py_func_name;     // Python function name (attribute)
-    static std::string py_module_name;   // Python module to import
+    static std::string py_func_name;
+    static std::string py_module_name;
 
-    void initialize_python_function(const std::string &func_name);
+    // Exploration parameters
+    int exploration_frequency;
+    int exploration_depth;
+    double improvement_threshold;
+    int exploration_budget;
+
+    // Tracking
+    static int evaluation_count;
+    static int exploration_count;
+    static std::unordered_set<uint64_t> explored_states;
+
+    // Relaxed plan tracking (from base class usage)
+    std::vector<bool> relaxed_plan;
+
+    // Helper methods
     void ensure_python_ready();
-
-    std::map<std::string, std::string> convert_state_to_map(const State &state);
-    void mark_preferred_operators_and_relaxed_plan(const State &state, PropID goal_id);
+    bool should_explore_now();
+    void explore_from_state(const State &state, int current_cost);
+    void probe_successors(const State &state, int current_cost, int depth, int &budget);
+    double evaluate_state_with_nn(const State &state);
 
 protected:
-    int compute_heuristic(const State &ancestor_state) override;
+    virtual int compute_heuristic(const State &ancestor_state) override;
+
+    virtual void mark_preferred_operators_and_relaxed_plan(
+        const State &state, relaxation_heuristic::PropID goal_id);
 
 public:
     explicit AntPlanHeuristic(const options::Options &opts);
-    ~AntPlanHeuristic() override;
+    virtual ~AntPlanHeuristic() override;
 };
 
-} // namespace antplan_heuristic
+}
 
 #endif
