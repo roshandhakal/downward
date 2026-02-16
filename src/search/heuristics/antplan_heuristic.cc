@@ -268,7 +268,12 @@ void AntPlanHeuristic::probe_successors(const State &state, int current_cost,
     if (depth == 0 || budget <= 0) return;
 
     uint64_t state_hash = hash_state_values(task_proxy, state);
-    if (explored_states.count(state_hash)) return;
+    if (explored_states.count(state_hash)) {
+        if (g_debug) {
+            utils::g_log << "[AntPlan]   State already explored (skipping)\n";
+        }
+        return;
+    }
     explored_states.insert(state_hash);
 
     // Periodically clear explored_states to avoid memory growth
@@ -279,41 +284,104 @@ void AntPlanHeuristic::probe_successors(const State &state, int current_cost,
     py::gil_scoped_acquire gil;
 
     std::vector<std::pair<OperatorProxy, double>> promising_ops;
+    int applicable_count = 0;
+    int improved_count = 0;
+    double threshold = current_cost * improvement_threshold;
 
+    if (g_debug) {
+        utils::g_log << "[AntPlan]   Probing at depth " << (exploration_depth - depth) 
+                    << ", current cost: " << current_cost 
+                    << ", improvement threshold: " << threshold 
+                    << " (need < " << threshold << " to improve)\n";
+    }
+
+    // Count total operators first for better debugging
+    int total_ops = task_proxy.get_operators().size();
+    
     for (OperatorProxy op : task_proxy.get_operators()) {
         if (!task_properties::is_applicable(op, state)) continue;
-        if (--budget < 0) break;
+        
+        applicable_count++;
+        if (budget <= 0) {
+            if (g_debug) {
+                utils::g_log << "[AntPlan]   Budget exhausted after checking " 
+                            << applicable_count << " applicable operators (out of " 
+                            << total_ops << " total)\n";
+            }
+            break;
+        }
+        --budget;
 
         State succ = state.get_unregistered_successor(op);
         double succ_cost = evaluate_state_with_nn(succ);
 
-        if (succ_cost < current_cost * improvement_threshold) {
+        bool improved = (succ_cost < threshold);
+        
+        if (g_debug) {
+            utils::g_log << "[AntPlan]   [" << applicable_count << "] " 
+                        << op.get_name() 
+                        << " -> cost=" << succ_cost;
+            if (improved) {
+                utils::g_log << " ✓ IMPROVED by " << (current_cost - succ_cost) 
+                            << " (new=" << succ_cost << " < threshold=" << threshold << ")\n";
+            } else {
+                utils::g_log << " ✗ no improvement (new=" << succ_cost 
+                            << " >= threshold=" << threshold << ")\n";
+            }
+        }
+
+        if (improved) {
             promising_ops.push_back({op, succ_cost});
+            improved_count++;
         }
     }
 
-    // Sort by cost (best first) - explicit types instead of auto
+    if (g_debug) {
+        utils::g_log << "[AntPlan]   === Summary: " << applicable_count 
+                    << " applicable ops (out of " << total_ops << " total), "
+                    << improved_count << " improved, " 
+                    << promising_ops.size() << " promising ===\n";
+    }
+
+    // Sort by cost (best first)
     std::sort(promising_ops.begin(), promising_ops.end(),
               [](const std::pair<OperatorProxy, double> &a, 
                  const std::pair<OperatorProxy, double> &b) { 
                   return a.second < b.second; 
               });
 
+    // Mark top 3 as preferred
     for (size_t i = 0; i < std::min(size_t(3), promising_ops.size()); ++i) {
         set_preferred(promising_ops[i].first);
 
         if (g_debug) {
-            utils::g_log << "[AntPlan] Depth " << (exploration_depth - depth)
-                        << ": Preferring " << promising_ops[i].first.get_name()
-                        << " (cost: " << current_cost << " -> " << promising_ops[i].second << ")\n";
+            utils::g_log << "[AntPlan] >>> Depth " << (exploration_depth - depth)
+                        << ": PREFERRING #" << (i+1) << " " 
+                        << promising_ops[i].first.get_name()
+                        << " (cost improvement: " << current_cost << " -> " 
+                        << promising_ops[i].second << ", delta=" 
+                        << (current_cost - promising_ops[i].second) << ")\n";
         }
     }
 
-    for (size_t i = 0; i < std::min(size_t(2), promising_ops.size()); ++i) {
-        if (budget <= 0) break;
+    // Recursively explore from top 2 promising successors
+    if (depth > 1) {
+        for (size_t i = 0; i < std::min(size_t(2), promising_ops.size()); ++i) {
+            if (budget <= 0) {
+                if (g_debug) {
+                    utils::g_log << "[AntPlan]   Budget exhausted, stopping recursive exploration\n";
+                }
+                break;
+            }
 
-        State succ = state.get_unregistered_successor(promising_ops[i].first);
-        probe_successors(succ, static_cast<int>(promising_ops[i].second), depth - 1, budget);
+            if (g_debug) {
+                utils::g_log << "[AntPlan]   Recursively exploring from " 
+                            << promising_ops[i].first.get_name() << "\n";
+            }
+
+            State succ = state.get_unregistered_successor(promising_ops[i].first);
+            probe_successors(succ, static_cast<int>(promising_ops[i].second), depth - 1, budget);
+        }
     }
 }
 
@@ -323,16 +391,23 @@ void AntPlanHeuristic::explore_from_state(const State &state, int current_cost) 
     int budget = exploration_budget;
 
     if (g_debug) {
+        utils::g_log << "[AntPlan] ======================================\n";
         utils::g_log << "[AntPlan] === Exploration #" << exploration_count
-                    << " at eval " << evaluation_count
-                    << " (budget: " << budget << ", depth: " << exploration_depth << ") ===\n";
+                    << " at eval " << evaluation_count << " ===\n";
+        utils::g_log << "[AntPlan] === Budget: " << budget 
+                    << ", Depth: " << exploration_depth 
+                    << ", Threshold: " << improvement_threshold << " ===\n";
+        utils::g_log << "[AntPlan] ======================================\n";
     }
 
     probe_successors(state, current_cost, exploration_depth, budget);
 
     if (g_debug) {
-        utils::g_log << "[AntPlan] Exploration used " << (exploration_budget - budget)
-                    << "/" << exploration_budget << " budget\n";
+        utils::g_log << "[AntPlan] ======================================\n";
+        utils::g_log << "[AntPlan] === Exploration #" << exploration_count << " complete ===\n";
+        utils::g_log << "[AntPlan] === Used " << (exploration_budget - budget)
+                    << "/" << exploration_budget << " budget ===\n";
+        utils::g_log << "[AntPlan] ======================================\n";
     }
 }
 
@@ -487,3 +562,17 @@ static std::shared_ptr<Heuristic> _parse(OptionParser &parser) {
 static Plugin<Evaluator> _plugin("antplan", _parse);
 
 } // namespace antplan_heuristic
+// ```
+
+// Now when you run this, you'll see detailed output like:
+// ```
+// [AntPlan] ======================================
+// [AntPlan] === Exploration #1 at eval 5 ===
+// [AntPlan] === Budget: 50, Depth: 3, Threshold: 0.95 ===
+// [AntPlan] ======================================
+// [AntPlan]   Probing at depth 0, current cost: 282, improvement threshold: 267.9 (need < 267.9 to improve)
+// [AntPlan]   [1] movepick-obj5-table0 -> cost=278 ✓ IMPROVED by 4 (new=278 < threshold=267.9)
+// [AntPlan]   === Summary: 1 applicable ops (out of 49 total), 1 improved, 1 promising ===
+// [AntPlan] >>> Depth 0: PREFERRING #1 movepick-obj5-table0 (cost improvement: 282 -> 278, delta=4)
+// [AntPlan]   Recursively exploring from movepick-obj5-table0
+// ...
