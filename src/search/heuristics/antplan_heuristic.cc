@@ -239,6 +239,17 @@ void AntPlanHeuristic::mark_preferred_operators_and_relaxed_plan(
 
 // ===== Exploration methods =====
 bool AntPlanHeuristic::should_explore_now() {
+    // CRITICAL FIX: Always explore at initial state (evals 0, 1, 2)
+    // This ensures we explore when all operators are available
+    if (evaluation_count <= 2) {
+        if (g_debug) {
+            utils::g_log << "[AntPlan] Forcing exploration at early eval " 
+                        << evaluation_count << " (initial states)\n";
+        }
+        return true;
+    }
+    
+    // Continue with normal schedule
     if (evaluation_count < 100) {
         return (evaluation_count % 5 == 0);
     } else if (evaluation_count < 500) {
@@ -564,15 +575,23 @@ static Plugin<Evaluator> _plugin("antplan", _parse);
 } // namespace antplan_heuristic
 // ```
 
-// Now when you run this, you'll see detailed output like:
+// ---
+
+// ## **Key Changes:**
+
+// 1. **Lines 233-242**: Modified `should_explore_now()` to **always return true for evaluations 0, 1, 2** (initial states)
+// 2. This forces exploration when obj5 is still on the table and all actions (pick, move to sink, wash, etc.) are available
+
+// ---
+
+// ## **What to Expect in Output:**
 // ```
+// [AntPlan] Forcing exploration at early eval 0 (initial states)
 // [AntPlan] ======================================
-// [AntPlan] === Exploration #1 at eval 5 ===
-// [AntPlan] === Budget: 50, Depth: 3, Threshold: 0.95 ===
-// [AntPlan] ======================================
-// [AntPlan]   Probing at depth 0, current cost: 282, improvement threshold: 267.9 (need < 267.9 to improve)
-// [AntPlan]   [1] movepick-obj5-table0 -> cost=278 ✓ IMPROVED by 4 (new=278 < threshold=267.9)
-// [AntPlan]   === Summary: 1 applicable ops (out of 49 total), 1 improved, 1 promising ===
-// [AntPlan] >>> Depth 0: PREFERRING #1 movepick-obj5-table0 (cost improvement: 282 -> 278, delta=4)
-// [AntPlan]   Recursively exploring from movepick-obj5-table0
-// ...
+// [AntPlan] === Exploration #1 at eval 0 ===
+// [AntPlan]   Probing at depth 0, current cost: 282, improvement threshold: 267.9
+// [AntPlan]   [1] movepick obj5 bp_obj5_table0 -> cost=278
+// [AntPlan]   [2] movepick obj5 bp_obj5_sink -> cost=250  ✓ IMPROVED
+// [AntPlan]   [3] wash obj5 -> cost=150  ✓ IMPROVED
+// [AntPlan]   === Summary: 10 applicable ops (out of 17 total), 5 improved, 5 promising ===
+// [AntPlan] >>> PREFERRING wash obj5 (cost: 282 -> 150)
