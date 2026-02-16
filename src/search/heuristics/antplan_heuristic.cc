@@ -361,8 +361,8 @@ void AntPlanHeuristic::probe_successors(const State &state, int current_cost,
                   return a.second < b.second; 
               });
 
-    // Mark top 3 as preferred
-    for (size_t i = 0; i < std::min(size_t(3), promising_ops.size()); ++i) {
+    // Mark all as preferred
+    for (size_t i = 0; i < promising_ops.size(); ++i) {
         set_preferred(promising_ops[i].first);
 
         if (g_debug) {
