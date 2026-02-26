@@ -257,7 +257,7 @@ double AntPlanHeuristic::evaluate_state_with_nn(const State &state) {
     return py_scalar_to_double(res);
 }
 
-double AntPlanHeuristic::probe_successors(const State &state, int current_cost,
+double AntPlanHeuristic::probe_successors(const State &state, double current_cost,
                                           int depth, int &budget, bool is_root) {
     if (depth == 0 || budget <= 0) return current_cost;
 
@@ -342,6 +342,7 @@ double AntPlanHeuristic::probe_successors(const State &state, int current_cost,
                   return a.second < b.second; 
               });
 
+    // The cost of being in this state (what we've achieved by reaching here)
     double min_cost_found = current_cost;
 
     // AT ROOT: Re-score operators by downstream potential
@@ -355,7 +356,7 @@ double AntPlanHeuristic::probe_successors(const State &state, int current_cost,
         for (auto &[op, imm_cost] : promising_ops) {
             State succ = state.get_unregistered_successor(op);
             int temp_budget = exploration_budget;
-            double downstream_cost = probe_successors(succ, static_cast<int>(imm_cost), 
+            double downstream_cost = probe_successors(succ, imm_cost, 
                                                      depth - 1, temp_budget, false);
             rescored.push_back({op, downstream_cost});
             min_cost_found = std::min(min_cost_found, downstream_cost);
@@ -380,7 +381,7 @@ double AntPlanHeuristic::probe_successors(const State &state, int current_cost,
             }
         }
     } else {
-        // NOT ROOT: Just explore recursively from top 2
+        // NOT ROOT: Just explore recursively to find minimum
         if (depth > 1) {
             for (size_t i = 0; i < std::min(size_t(2), promising_ops.size()); ++i) {
                 if (budget <= 0) break;
@@ -391,12 +392,10 @@ double AntPlanHeuristic::probe_successors(const State &state, int current_cost,
                 }
 
                 State succ = state.get_unregistered_successor(promising_ops[i].first);
-                double subtree_cost = probe_successors(succ, static_cast<int>(promising_ops[i].second), 
+                double subtree_cost = probe_successors(succ, promising_ops[i].second, 
                                                       depth - 1, budget, false);
                 min_cost_found = std::min(min_cost_found, subtree_cost);
             }
-        } else if (!promising_ops.empty()) {
-            min_cost_found = promising_ops[0].second;
         }
     }
 
@@ -418,7 +417,7 @@ void AntPlanHeuristic::explore_from_state(const State &state, int current_cost) 
         utils::g_log << "[AntPlan] ======================================\n";
     }
 
-    probe_successors(state, current_cost, exploration_depth, budget, true);
+    probe_successors(state, static_cast<double>(current_cost), exploration_depth, budget, true);
 
     if (g_debug) {
         utils::g_log << "[AntPlan] ======================================\n";

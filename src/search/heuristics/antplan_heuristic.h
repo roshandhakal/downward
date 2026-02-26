@@ -40,7 +40,7 @@ private:
     void ensure_python_ready();
     bool should_explore_now();
     void explore_from_state(const State &state, int current_cost);
-    double probe_successors(const State &state, int current_cost, int depth, int &budget, bool is_root);
+    double probe_successors(const State &state, double current_cost, int depth, int &budget, bool is_root);
     double evaluate_state_with_nn(const State &state);
 
 protected:
