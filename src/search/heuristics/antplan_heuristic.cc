@@ -338,7 +338,7 @@ void AntPlanHeuristic::probe_successors(const State &state, int current_cost,
         }
         
         
-        bool improved = (succ_cost < threshold);
+        bool improved = (succ_cost <= threshold);
         
         if (g_debug) {
             utils::g_log << "[AntPlan]   [" << applicable_count << "] " 
