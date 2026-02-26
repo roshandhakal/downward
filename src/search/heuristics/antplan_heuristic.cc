@@ -274,7 +274,7 @@ double AntPlanHeuristic::evaluate_state_with_nn(const State &state) {
     return py_scalar_to_double(res);
 }
 
-void AntPlanHeuristic::probe_successors(const State &state, int current_cost,
+void AntPlanHeuristic::probe_successors(const State &state, double current_cost,
                                         int depth, int &budget) {
     if (depth == 0 || budget <= 0) return;
 
@@ -391,12 +391,12 @@ void AntPlanHeuristic::probe_successors(const State &state, int current_cost,
             }
 
             State succ = state.get_unregistered_successor(promising_ops[i].first);
-            probe_successors(succ, static_cast<int>(promising_ops[i].second), depth - 1, budget);
+            probe_successors(succ, promising_ops[i].second, depth - 1, budget);
         }
     }
 }
 
-void AntPlanHeuristic::explore_from_state(const State &state, int current_cost) {
+void AntPlanHeuristic::explore_from_state(const State &state, double current_cost) {
     ++exploration_count;
 
     int budget = exploration_budget;
