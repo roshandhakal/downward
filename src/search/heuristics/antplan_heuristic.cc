@@ -324,8 +324,20 @@ void AntPlanHeuristic::probe_successors(const State &state, int current_cost,
         --budget;
 
         State succ = state.get_unregistered_successor(op);
-        double succ_cost = evaluate_state_with_nn(succ);
+        double succ_cost;
 
+        std::string op_name = op.get_name();
+        if (op_name.find("movepick") != std::string::npos) {
+            succ_cost = 0.0;
+            if (g_debug) {
+                utils::g_log << "[AntPlan]   [" << applicable_count << "] " 
+                            << op_name << " -> cost=0.0 (movepick assigned 0)\n";
+            }
+        } else {
+            succ_cost = evaluate_state_with_nn(succ);
+        }
+        
+        
         bool improved = (succ_cost < threshold);
         
         if (g_debug) {
