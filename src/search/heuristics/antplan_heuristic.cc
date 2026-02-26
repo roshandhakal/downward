@@ -239,17 +239,17 @@ void AntPlanHeuristic::mark_preferred_operators_and_relaxed_plan(
 
 // ===== Exploration methods =====
 bool AntPlanHeuristic::should_explore_now() {
-    // CRITICAL FIX: Always explore at initial state (evals 0, 1, 2)
-    // This ensures we explore when all operators are available
-    if (evaluation_count <= 2) {
+    // CRITICAL: Explore EVERY eval for first 50 evaluations
+    // This ensures we explore at each state during early search
+    if (evaluation_count <= 50) {
         if (g_debug) {
             utils::g_log << "[AntPlan] Forcing exploration at early eval " 
-                        << evaluation_count << " (initial states)\n";
+                        << evaluation_count << " (comprehensive early exploration)\n";
         }
         return true;
     }
     
-    // Continue with normal schedule
+    // After that, use normal schedule
     if (evaluation_count < 100) {
         return (evaluation_count % 5 == 0);
     } else if (evaluation_count < 500) {
