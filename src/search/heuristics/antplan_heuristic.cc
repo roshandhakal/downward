@@ -363,28 +363,34 @@ void AntPlanHeuristic::probe_successors(const State &state, int current_cost,
                   return a.second < b.second; 
               });
 
-    // CRITICAL FIX: Only mark preferences if we're at the root state
-    if (is_root) {
-        for (size_t i = 0; i < promising_ops.size(); ++i) {
-            set_preferred(promising_ops[i].first);
+        // CRITICAL FIX: Only mark BEST preference if we're at the root state
+    if (is_root && !promising_ops.empty()) {
+        // Mark ONLY the best action (index 0, already sorted by cost)
+        set_preferred(promising_ops[0].first);
 
-            if (g_debug) {
-                utils::g_log << "[AntPlan] >>> Depth " << (exploration_depth - depth)
-                            << ": PREFERRING #" << (i+1) << " " 
-                            << promising_ops[i].first.get_name()
-                            << " (cost improvement: " << current_cost << " -> " 
-                            << promising_ops[i].second << ", delta=" 
-                            << (current_cost - promising_ops[i].second) << ")\n";
+        if (g_debug) {
+            utils::g_log << "[AntPlan] >>> Depth " << (exploration_depth - depth)
+                        << ": PREFERRING BEST: " 
+                        << promising_ops[0].first.get_name()
+                        << " (cost improvement: " << current_cost << " -> " 
+                        << promising_ops[0].second << ", delta=" 
+                        << (current_cost - promising_ops[0].second) << ")\n";
+            
+            // Show what we're NOT marking
+            if (promising_ops.size() > 1) {
+                utils::g_log << "[AntPlan]     (Skipping " << (promising_ops.size() - 1) 
+                            << " other promising ops:";
+                for (size_t i = 1; i < std::min(size_t(3), promising_ops.size()); ++i) {
+                    utils::g_log << " " << promising_ops[i].first.get_name();
+                }
+                utils::g_log << ")\n";
             }
         }
-    } else {
-        if (g_debug && !promising_ops.empty()) {
-            utils::g_log << "[AntPlan]   (Found " << promising_ops.size() 
-                        << " promising ops at depth " << (exploration_depth - depth)
-                        << ", but NOT marking as preferred - only root preferences matter)\n";
-        }
+    } else if (!is_root && g_debug && !promising_ops.empty()) {
+        utils::g_log << "[AntPlan]   (Found " << promising_ops.size() 
+                    << " promising ops at depth " << (exploration_depth - depth)
+                    << ", but NOT marking as preferred - only root preferences matter)\n";
     }
-
     // Recursively explore from top 2 promising successors (but don't mark their preferences)
     if (depth > 1) {
         for (size_t i = 0; i < std::min(size_t(2), promising_ops.size()); ++i) {
