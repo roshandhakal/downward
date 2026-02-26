@@ -241,14 +241,13 @@ void AntPlanHeuristic::mark_preferred_operators_and_relaxed_plan(
 bool AntPlanHeuristic::should_explore_now() {
     // CRITICAL FIX: Always explore at initial state (evals 0, 1, 2)
     // This ensures we explore when all operators are available
-    return true;
-    // if (evaluation_count <= 2) {
-    //     if (g_debug) {
-    //         utils::g_log << "[AntPlan] Forcing exploration at early eval " 
-    //                     << evaluation_count << " (initial states)\n";
-    //     }
-    //     return true;
-    // }
+    if (evaluation_count <= 2) {
+        if (g_debug) {
+            utils::g_log << "[AntPlan] Forcing exploration at early eval " 
+                        << evaluation_count << " (initial states)\n";
+        }
+        return true;
+    }
     
     // Continue with normal schedule
     if (evaluation_count < 100) {
@@ -327,7 +326,7 @@ void AntPlanHeuristic::probe_successors(const State &state, int current_cost,
         State succ = state.get_unregistered_successor(op);
         double succ_cost = evaluate_state_with_nn(succ);
 
-        bool improved = (succ_cost <= threshold);
+        bool improved = (succ_cost < threshold);
         
         if (g_debug) {
             utils::g_log << "[AntPlan]   [" << applicable_count << "] " 
