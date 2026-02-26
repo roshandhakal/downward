@@ -462,8 +462,20 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
         if (std::isnan(anticipatory_cost) || std::isinf(anticipatory_cost)) {
             anticipatory_cost_int = 0;
         } else {
-            anticipatory_cost_int = static_cast<int>(std::lround(anticipatory_cost));
-            if (anticipatory_cost_int < 0) anticipatory_cost_int = 0;
+           // Pick these once and keep them fixed:
+            constexpr double SCALE = 1000.0;   // keeps decimals meaningful
+            constexpr double SHIFT = 1000.0;   // ensures typical negatives don't collapse to 0
+
+            double mapped = SCALE * anticipatory_cost + SHIFT;
+
+            int h;
+            if (std::isnan(mapped) || std::isinf(mapped)) {
+                h = 0;
+            } else {
+                h = static_cast<int>(std::lround(mapped));
+                if (h < 0) h = 0;
+            }
+            anticipatory_cost_int = h;
         }
 
     } catch (const std::exception &e) {
