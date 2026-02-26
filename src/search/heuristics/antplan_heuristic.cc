@@ -261,6 +261,16 @@ double AntPlanHeuristic::probe_successors(const State &state, double current_cos
                                           int depth, int &budget, bool is_root) {
     if (depth == 0 || budget <= 0) return current_cost;
 
+    // If we've achieved a very good state (cost near or below 0), this is a terminal goal state
+    // Don't waste budget exploring picks from this state - we've found our answer
+    if (current_cost < 1.0 && !is_root) {
+        if (g_debug) {
+            utils::g_log << "[AntPlan]   Good terminal state (cost=" << current_cost 
+                        << "), stopping exploration here\n";
+        }
+        return current_cost;
+    }
+
     uint64_t state_hash = hash_state_values(task_proxy, state);
     if (explored_states.count(state_hash)) {
         if (g_debug) {
@@ -336,9 +346,10 @@ double AntPlanHeuristic::probe_successors(const State &state, double current_cos
                     << promising_ops.size() << " promising ===\n";
     }
 
+    // Sort by cost (best first)
     std::sort(promising_ops.begin(), promising_ops.end(),
               [](const std::pair<OperatorProxy, double> &a, 
-                 const std::pair<OperatorProxy, double> &b) { 
+                 const std::pair<OperatorProxy, double> &b) -> bool { 
                   return a.second < b.second; 
               });
 
@@ -353,7 +364,10 @@ double AntPlanHeuristic::probe_successors(const State &state, double current_cos
             utils::g_log << "[AntPlan]   === ROOT: Rescoring operators by downstream potential ===\n";
         }
         
-        for (auto &[op, imm_cost] : promising_ops) {
+        for (size_t i = 0; i < promising_ops.size(); ++i) {
+            OperatorProxy op = promising_ops[i].first;
+            double imm_cost = promising_ops[i].second;
+            
             State succ = state.get_unregistered_successor(op);
             int temp_budget = exploration_budget;
             double downstream_cost = probe_successors(succ, imm_cost, 
@@ -368,8 +382,12 @@ double AntPlanHeuristic::probe_successors(const State &state, double current_cos
             }
         }
         
+        // Sort rescored by downstream cost
         std::sort(rescored.begin(), rescored.end(),
-                  [](auto &a, auto &b) { return a.second < b.second; });
+                  [](const std::pair<OperatorProxy, double> &a, 
+                     const std::pair<OperatorProxy, double> &b) -> bool { 
+                      return a.second < b.second; 
+                  });
         
         for (size_t i = 0; i < rescored.size(); ++i) {
             set_preferred(rescored[i].first);
@@ -401,6 +419,7 @@ double AntPlanHeuristic::probe_successors(const State &state, double current_cos
 
     return min_cost_found;
 }
+
 
 void AntPlanHeuristic::explore_from_state(const State &state, int current_cost) {
     ++exploration_count;
