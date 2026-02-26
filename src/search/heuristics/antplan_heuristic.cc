@@ -275,7 +275,7 @@ double AntPlanHeuristic::evaluate_state_with_nn(const State &state) {
 }
 
 void AntPlanHeuristic::probe_successors(const State &state, int current_cost,
-                                        int depth, int &budget) {
+                                        int depth, int &budget, bool is_root) {
     if (depth == 0 || budget <= 0) return;
 
     uint64_t state_hash = hash_state_values(task_proxy, state);
@@ -303,7 +303,9 @@ void AntPlanHeuristic::probe_successors(const State &state, int current_cost,
         utils::g_log << "[AntPlan]   Probing at depth " << (exploration_depth - depth) 
                     << ", current cost: " << current_cost 
                     << ", improvement threshold: " << threshold 
-                    << " (need < " << threshold << " to improve)\n";
+                    << " (need < " << threshold << " to improve)"
+                    << (is_root ? " [ROOT - will mark preferences]" : " [deep - no preferences]")
+                    << "\n";
     }
 
     // Count total operators first for better debugging
@@ -361,21 +363,35 @@ void AntPlanHeuristic::probe_successors(const State &state, int current_cost,
                   return a.second < b.second; 
               });
 
-    // Mark all as preferred
-    for (size_t i = 0; i < promising_ops.size(); ++i) {
-        set_preferred(promising_ops[i].first);
+        // CRITICAL FIX: Only mark BEST preference if we're at the root state
+    if (is_root && !promising_ops.empty()) {
+        // Mark ONLY the best action (index 0, already sorted by cost)
+        set_preferred(promising_ops[0].first);
 
         if (g_debug) {
             utils::g_log << "[AntPlan] >>> Depth " << (exploration_depth - depth)
-                        << ": PREFERRING #" << (i+1) << " " 
-                        << promising_ops[i].first.get_name()
+                        << ": PREFERRING BEST: " 
+                        << promising_ops[0].first.get_name()
                         << " (cost improvement: " << current_cost << " -> " 
-                        << promising_ops[i].second << ", delta=" 
-                        << (current_cost - promising_ops[i].second) << ")\n";
+                        << promising_ops[0].second << ", delta=" 
+                        << (current_cost - promising_ops[0].second) << ")\n";
+            
+            // Show what we're NOT marking
+            if (promising_ops.size() > 1) {
+                utils::g_log << "[AntPlan]     (Skipping " << (promising_ops.size() - 1) 
+                            << " other promising ops:";
+                for (size_t i = 1; i < std::min(size_t(3), promising_ops.size()); ++i) {
+                    utils::g_log << " " << promising_ops[i].first.get_name();
+                }
+                utils::g_log << ")\n";
+            }
         }
+    } else if (!is_root && g_debug && !promising_ops.empty()) {
+        utils::g_log << "[AntPlan]   (Found " << promising_ops.size() 
+                    << " promising ops at depth " << (exploration_depth - depth)
+                    << ", but NOT marking as preferred - only root preferences matter)\n";
     }
-
-    // Recursively explore from top 2 promising successors
+    // Recursively explore from top 2 promising successors (but don't mark their preferences)
     if (depth > 1) {
         for (size_t i = 0; i < std::min(size_t(2), promising_ops.size()); ++i) {
             if (budget <= 0) {
@@ -391,7 +407,7 @@ void AntPlanHeuristic::probe_successors(const State &state, int current_cost,
             }
 
             State succ = state.get_unregistered_successor(promising_ops[i].first);
-            probe_successors(succ, static_cast<int>(promising_ops[i].second), depth - 1, budget);
+            probe_successors(succ, static_cast<int>(promising_ops[i].second), depth - 1, budget, false);
         }
     }
 }
@@ -411,7 +427,7 @@ void AntPlanHeuristic::explore_from_state(const State &state, int current_cost) 
         utils::g_log << "[AntPlan] ======================================\n";
     }
 
-    probe_successors(state, current_cost, exploration_depth, budget);
+    probe_successors(state, current_cost, exploration_depth, budget, true);  // is_root=true
 
     if (g_debug) {
         utils::g_log << "[AntPlan] ======================================\n";
@@ -573,25 +589,3 @@ static std::shared_ptr<Heuristic> _parse(OptionParser &parser) {
 static Plugin<Evaluator> _plugin("antplan", _parse);
 
 } // namespace antplan_heuristic
-// ```
-
-// ---
-
-// ## **Key Changes:**
-
-// 1. **Lines 233-242**: Modified `should_explore_now()` to **always return true for evaluations 0, 1, 2** (initial states)
-// 2. This forces exploration when obj5 is still on the table and all actions (pick, move to sink, wash, etc.) are available
-
-// ---
-
-// ## **What to Expect in Output:**
-// ```
-// [AntPlan] Forcing exploration at early eval 0 (initial states)
-// [AntPlan] ======================================
-// [AntPlan] === Exploration #1 at eval 0 ===
-// [AntPlan]   Probing at depth 0, current cost: 282, improvement threshold: 267.9
-// [AntPlan]   [1] movepick obj5 bp_obj5_table0 -> cost=278
-// [AntPlan]   [2] movepick obj5 bp_obj5_sink -> cost=250  ✓ IMPROVED
-// [AntPlan]   [3] wash obj5 -> cost=150  ✓ IMPROVED
-// [AntPlan]   === Summary: 10 applicable ops (out of 17 total), 5 improved, 5 promising ===
-// [AntPlan] >>> PREFERRING wash obj5 (cost: 282 -> 150)
