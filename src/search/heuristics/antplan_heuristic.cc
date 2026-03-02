@@ -14,6 +14,8 @@
 #include <utility>
 #include <vector>
 #include <unordered_map>
+#include <chrono>
+
 
 #include <pybind11/stl.h>
 
@@ -28,6 +30,9 @@ py::object AntPlanHeuristic::py_cost_fn;
 bool AntPlanHeuristic::py_ready = false;
 std::string AntPlanHeuristic::py_func_name = "anticipatory_cost_fn";
 std::string AntPlanHeuristic::py_module_name = "antplan.scripts.eval_antplan_gripper";
+static std::chrono::steady_clock::time_point g_start_time;
+static bool g_start_time_set = false;
+static constexpr double g_time_limit_seconds = 600.0; // 10 minutes
 
 int AntPlanHeuristic::evaluation_count = 0;
 int AntPlanHeuristic::exploration_count = 0;
@@ -424,6 +429,16 @@ void AntPlanHeuristic::explore_from_state(const State &state, double current_cos
 
 // ===== main computation =====
 int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
+    // --- Time limit check ---
+    if (!g_start_time_set) {
+        g_start_time = std::chrono::steady_clock::now();
+        g_start_time_set = true;
+    }
+    auto elapsed = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - g_start_time).count();
+    if (elapsed > g_time_limit_seconds) {
+        return 0;
+    }
     ++g_calls;
     ++evaluation_count;
 
