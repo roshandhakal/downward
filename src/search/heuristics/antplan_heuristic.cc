@@ -462,27 +462,19 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
         if (std::isnan(anticipatory_cost) || std::isinf(anticipatory_cost)) {
             anticipatory_cost_int = 0;
         } else {
-            // --- tiny non-dominating mapping that distinguishes negative decimals ---
-            constexpr double NEG_CLAMP = 1.0;  // treat <= -1.0 as equally "best"
-            constexpr int    NEG_BINS  = 5;    // max influence contributed by AntPlan on negative states
+           // Pick these once and keep them fixed:
+            constexpr double SCALE = 10.0;   // keeps decimals meaningful
+            constexpr double SHIFT = 10.0;   // ensures typical negatives don't collapse to 0
 
-            auto clampd = [](double v, double lo, double hi) -> double {
-                return (v < lo) ? lo : ((v > hi) ? hi : v);
-            };
+            double mapped = SCALE * anticipatory_cost + SHIFT;
 
-            int h = 0;
-            if (std::isnan(anticipatory_cost) || std::isinf(anticipatory_cost)) {
+            int h;
+            if (std::isnan(mapped) || std::isinf(mapped)) {
                 h = 0;
-            } else if (anticipatory_cost < 0.0) {
-                // Map [-NEG_CLAMP, 0] -> [0, NEG_BINS]
-                double x = clampd(anticipatory_cost, -NEG_CLAMP, 0.0);
-                double t = (x + NEG_CLAMP) / NEG_CLAMP;            // in [0,1]
-                h = static_cast<int>(std::lround(t * NEG_BINS));   // in [0..NEG_BINS]
             } else {
-                // Keep all non-negative costs tied and small (doesn't dominate base heuristic)
-                h = NEG_BINS;
+                h = static_cast<int>(std::lround(mapped));
+                if (h < 0) h = 0;
             }
-
             anticipatory_cost_int = h;
         }
 
