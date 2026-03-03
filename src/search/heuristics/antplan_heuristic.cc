@@ -463,8 +463,8 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
             anticipatory_cost_int = 0;
         } else {
            // Pick these once and keep them fixed:
-            constexpr double SCALE = 100.0;   // keeps decimals meaningful
-            constexpr double SHIFT = 100.0;   // ensures typical negatives don't collapse to 0
+            constexpr double SCALE = 10.0;   // keeps decimals meaningful
+            constexpr double SHIFT = 10.0;   // ensures typical negatives don't collapse to 0
 
             double mapped = SCALE * anticipatory_cost + SHIFT;
 
