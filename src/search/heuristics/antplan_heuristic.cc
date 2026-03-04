@@ -462,24 +462,19 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
         if (std::isnan(anticipatory_cost) || std::isinf(anticipatory_cost)) {
             anticipatory_cost_int = 0;
         } else {
-            int h = 0;
-            if (std::isnan(anticipatory_cost) || std::isinf(anticipatory_cost)) {
-                h = 0;
-            } else if (anticipatory_cost < 0.0) {
-                // Any negative is "best"
+           // Pick these once and keep them fixed:
+            constexpr double SCALE = 10.0;   // keeps decimals meaningful
+            constexpr double SHIFT = 10.0;   // ensures typical negatives don't collapse to 0
+
+            double mapped = SCALE * anticipatory_cost + SHIFT;
+
+            int h;
+            if (std::isnan(mapped) || std::isinf(mapped)) {
                 h = 0;
             } else {
-                // Quantize positives into small bins so 0.25 < 0.42 gives smaller h
-                constexpr double STEP = 0.10;   // 0.10 -> 0.25 maps to bin 2, 0.42 maps to bin 4
-                constexpr int    CAP  = 10;     // keep this contribution small (max ~11)
-
-                int bin = static_cast<int>(std::floor(anticipatory_cost / STEP));
-                if (bin < 0) bin = 0;
-                if (bin > CAP) bin = CAP;
-
-                h = 1 + bin;  // positives start at 1, so they’re always worse than negatives (0)
+                h = static_cast<int>(std::lround(mapped));
+                if (h < 0) h = 0;
             }
-
             anticipatory_cost_int = h;
         }
 
