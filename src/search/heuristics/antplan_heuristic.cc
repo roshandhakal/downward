@@ -114,7 +114,7 @@ void AntPlanHeuristic::ensure_python_ready() {
         throw runtime_error("[AntPlan] No Python module provided.");
 
     // Make sure "." is on sys.path exactly once.
-    py::module_ sys  = py::module_::import("sys");
+    py::module sys  = py::module::import("sys");
     py::list    path = sys.attr("path");
     bool has_dot = false;
     for (auto item : path)
@@ -122,7 +122,7 @@ void AntPlanHeuristic::ensure_python_ready() {
     if (!has_dot)
         path.attr("insert")(0, ".");
 
-    py::object mod = py::module_::import(py_module_name_.c_str());
+    py::object mod = py::module::import(py_module_name_.c_str());
     if (!py::hasattr(mod, py_func_name_.c_str()))
         throw runtime_error(
             "[AntPlan] '" + py_func_name_ +
@@ -303,7 +303,7 @@ int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
             try {
                 py::gil_scoped_acquire gil2;
                 string tb = py::cast<string>(
-                    py::module_::import("traceback").attr("format_exc")());
+                    py::module::import("traceback").attr("format_exc")());
                 utils::g_log << "[AntPlan] Python error: " << e.what()
                              << "\n" << tb << endl;
             } catch (...) {
