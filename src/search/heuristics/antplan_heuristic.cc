@@ -56,7 +56,7 @@ AntPlanHeuristic::AntPlanHeuristic(const options::Options &opts)
     : AdditiveHeuristic(opts),
       // ---- init order MUST match declaration order in .h ----
       relaxed_plan_(task_proxy.get_operators().size(), false),
-      scale_factor_(opts.get<double>("scale")),
+      scale_factor_(opts.get<int>("scale")),
       offset_(opts.get<int>("offset")),
       use_cache_(opts.get<bool>("cache")),
       cache_max_entries_(
@@ -346,11 +346,11 @@ static shared_ptr<Heuristic> _parse(OptionParser &parser) {
         "antplan.scripts.eval_antplan_gripper");
 
     // ---- float -> int conversion ----
-    parser.add_option<double>(
+    parser.add_option<int>(
         "scale",
         "Multiplier applied to the raw Python float before rounding.  "
         "Larger values preserve more decimal precision.",
-        "10000.0");
+        "1000");
     parser.add_option<int>(
         "offset",
         "Constant added after scaling to shift negative values into the "

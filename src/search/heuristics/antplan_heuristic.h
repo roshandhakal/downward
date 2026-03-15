@@ -71,7 +71,7 @@ private:
     std::vector<bool> relaxed_plan_;
 
     // ---- Float -> int conversion ----
-    double scale_factor_;
+    int    scale_factor_;
     int    offset_;
     static constexpr int MAX_H = 100000000;
 
