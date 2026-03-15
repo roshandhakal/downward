@@ -13,534 +13,359 @@
 #include <string>
 #include <utility>
 #include <vector>
-#include <unordered_map>
 
+#include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
 namespace py = pybind11;
 using namespace std;
-using namespace relaxation_heuristic;
 
 namespace antplan_heuristic {
 
-// ===== Static definitions =====
-py::object AntPlanHeuristic::py_cost_fn;
-bool AntPlanHeuristic::py_ready = false;
-std::string AntPlanHeuristic::py_func_name = "anticipatory_cost_fn";
-std::string AntPlanHeuristic::py_module_name = "antplan.scripts.eval_antplan_gripper";
+// ===== Static members =====
+py::object  AntPlanHeuristic::py_cost_fn_;
+bool        AntPlanHeuristic::py_ready_       = false;
+string      AntPlanHeuristic::py_func_name_   = "anticipatory_cost_fn";
+string      AntPlanHeuristic::py_module_name_ = "antplan.scripts.eval_antplan_gripper";
 
-int AntPlanHeuristic::evaluation_count = 0;
-int AntPlanHeuristic::exploration_count = 0;
-std::unordered_set<uint64_t> AntPlanHeuristic::explored_states;
 
-// ---- Fast-path tables (built once) ----
-static bool g_py_tables_ready = false;
-static vector<py::str> g_py_var_names;                  // [var_id]
-static vector<vector<py::str>> g_py_fact_names;         // [var_id][value]
+// ===================================================================
+//  Helpers
+// ===================================================================
 
-// ---- Options (set from parser) ----
-static bool g_debug = false;
-static bool g_log_states = false;
-static bool g_use_cache = true;
-static size_t g_cache_max_entries = 500000;
-
-// ---- Simple memo cache (keyed by 64-bit hash of state values) ----
-static unordered_map<uint64_t, int> g_cache;
-
-// ---- Stats ----
-static uint64_t g_calls = 0;
-static uint64_t g_cache_hits = 0;
-static uint64_t g_cache_misses = 0;
-
-// ===== helpers =====
-static inline uint64_t fnv1a_64_update(uint64_t h, uint64_t x) {
+/// FNV-1a 64-bit update step.
+static inline uint64_t fnv1a_update(uint64_t h, uint64_t x) {
     h ^= x;
     h *= 1099511628211ULL;
     return h;
 }
 
-static uint64_t hash_state_values(const TaskProxy &task_proxy, const State &state) {
-    uint64_t h = 1469598103934665603ULL;
-    int num_vars = task_proxy.get_variables().size();
-    for (int var_id = 0; var_id < num_vars; ++var_id) {
-        FactProxy fact = state[var_id];
-        uint64_t v = static_cast<uint64_t>(fact.get_value());
-        h = fnv1a_64_update(h, v + 0x9e3779b97f4a7c15ULL + (static_cast<uint64_t>(var_id) << 1));
+/// Extract a double from a Python object that may be a torch/numpy scalar.
+static inline double py_to_double(py::object obj) {
+    if (py::hasattr(obj, "item"))
+        obj = obj.attr("item")();
+    return obj.cast<double>();
+}
+
+
+// ===================================================================
+//  Construction / destruction
+// ===================================================================
+
+AntPlanHeuristic::AntPlanHeuristic(const options::Options &opts)
+    : AdditiveHeuristic(opts),
+      // ---- init order MUST match declaration order in .h ----
+      relaxed_plan_(task_proxy.get_operators().size(), false),
+      scale_factor_(opts.get<double>("scale")),
+      offset_(opts.get<int>("offset")),
+      use_cache_(opts.get<bool>("cache")),
+      cache_max_entries_(
+          static_cast<size_t>(max(0, opts.get<int>("cache_max_entries")))),
+      debug_(opts.get<bool>("debug")),
+      log_states_(opts.get<bool>("log_states"))
+{
+    py_func_name_   = opts.get<string>("function");
+    py_module_name_ = opts.get<string>("module");
+    py_ready_       = false;
+
+    utils::g_log << "[AntPlan] function=" << py_func_name_
+                 << "  module="
+                 << (py_module_name_.empty() ? "<none>" : py_module_name_)
+                 << "  scale=" << scale_factor_
+                 << "  offset=" << offset_
+                 << endl;
+
+    ensure_python_ready();
+    ensure_tables(task_proxy);
+}
+
+AntPlanHeuristic::~AntPlanHeuristic() {
+    if (debug_) {
+        utils::g_log << "[AntPlan] stats: calls=" << stat_calls_
+                     << "  cache_hits=" << stat_cache_hits_
+                     << "  cache_misses=" << stat_cache_miss_ << endl;
+    }
+}
+
+
+// ===================================================================
+//  Python initialisation
+// ===================================================================
+
+void AntPlanHeuristic::initialize_python_function(const string &func_name) {
+    py_func_name_ = func_name;
+    py_ready_     = false;
+    // Caller is expected to invoke ensure_python_ready() afterwards.
+}
+
+void AntPlanHeuristic::ensure_python_ready() {
+    if (py_ready_)
+        return;
+
+    // If the interpreter isn't running yet, start it via the C API.
+    // (py::initialize_interpreter() is only available with pybind11's
+    //  scoped_interpreter; the FD build embeds Python differently.)
+    if (!Py_IsInitialized())
+        Py_Initialize();
+
+    py::gil_scoped_acquire gil;
+
+    if (py_module_name_.empty())
+        throw runtime_error("[AntPlan] No Python module provided.");
+
+    // Make sure "." is on sys.path exactly once.
+    py::module_ sys  = py::module_::import("sys");
+    py::list    path = sys.attr("path");
+    bool has_dot = false;
+    for (auto item : path)
+        if (py::cast<string>(item) == ".") { has_dot = true; break; }
+    if (!has_dot)
+        path.attr("insert")(0, ".");
+
+    py::object mod = py::module_::import(py_module_name_.c_str());
+    if (!py::hasattr(mod, py_func_name_.c_str()))
+        throw runtime_error(
+            "[AntPlan] '" + py_func_name_ +
+            "' not found in module '" + py_module_name_ + "'");
+
+    py_cost_fn_ = mod.attr(py_func_name_.c_str());
+    py_ready_   = true;
+
+    if (debug_)
+        utils::g_log << "[AntPlan] Python ready." << endl;
+}
+
+
+// ===================================================================
+//  Pre-built Python string tables
+// ===================================================================
+
+void AntPlanHeuristic::ensure_tables(TaskProxy &tp) {
+    if (tables_ready_)
+        return;
+
+    py::gil_scoped_acquire gil;
+
+    int n = tp.get_variables().size();
+    var_names_.clear();
+    fact_names_.clear();
+    var_names_.reserve(n);
+    fact_names_.resize(n);
+
+    for (int v = 0; v < n; ++v) {
+        VariableProxy var = tp.get_variables()[v];
+        var_names_.emplace_back(py::str(var.get_name()));
+
+        int dom = var.get_domain_size();
+        fact_names_[v].reserve(dom);
+        for (int d = 0; d < dom; ++d)
+            fact_names_[v].emplace_back(py::str(var.get_fact(d).get_name()));
+    }
+    tables_ready_ = true;
+
+    if (debug_)
+        utils::g_log << "[AntPlan] String tables built for "
+                     << n << " variables." << endl;
+}
+
+
+// ===================================================================
+//  Float -> non-negative int conversion
+// ===================================================================
+
+int AntPlanHeuristic::float_to_heuristic(double raw) const {
+    /*
+     * Formula:  h = clamp( round(raw * scale_factor) + offset, 0, MAX_H )
+     *
+     * Example (scale=10000, offset=100000):
+     *   raw = -0.4130  ->  round(-4130) + 100000 = 95870
+     *   raw = -0.0884  ->  round(-884)  + 100000 = 99116
+     *
+     * Lower (more negative) raw values produce lower h, which FD treats
+     * as "closer to the goal" — i.e. preferred by the search.
+     */
+    if (isnan(raw) || isinf(raw))
+        return 0;
+
+    long scaled = lround(raw * scale_factor_);
+    long h      = scaled + static_cast<long>(offset_);
+
+    if (h < 0)     return 0;
+    if (h > MAX_H) return MAX_H;
+    return static_cast<int>(h);
+}
+
+
+// ===================================================================
+//  State hashing & cache
+// ===================================================================
+
+uint64_t AntPlanHeuristic::hash_state(const State &state) const {
+    uint64_t h = 14695981039346656037ULL;  // FNV-1a offset basis
+    int n = task_proxy.get_variables().size();
+    for (int v = 0; v < n; ++v) {
+        uint64_t val = static_cast<uint64_t>(state[v].get_value());
+        h = fnv1a_update(h, val + 0x9e3779b97f4a7c15ULL
+                            + (static_cast<uint64_t>(v) << 1));
     }
     return h;
 }
 
-static void maybe_evict_cache() {
-    if (!g_use_cache) return;
-    if (g_cache.size() <= g_cache_max_entries) return;
-    g_cache.clear();
+void AntPlanHeuristic::maybe_evict_cache() {
+    if (cache_.size() > cache_max_entries_)
+        cache_.clear();
 }
 
-static void ensure_py_tables_ready(TaskProxy &task_proxy) {
-    if (g_py_tables_ready)
-        return;
 
-    py::gil_scoped_acquire gil;
+// ===================================================================
+//  Preferred operators (unchanged logic from original)
+// ===================================================================
 
-    int num_vars = task_proxy.get_variables().size();
-    g_py_var_names.clear();
-    g_py_fact_names.clear();
-    g_py_var_names.reserve(num_vars);
-    g_py_fact_names.resize(num_vars);
-
-    for (int var_id = 0; var_id < num_vars; ++var_id) {
-        VariableProxy var = task_proxy.get_variables()[var_id];
-        g_py_var_names.emplace_back(py::str(var.get_name()));
-
-        int dom = var.get_domain_size();
-        g_py_fact_names[var_id].reserve(dom);
-        for (int val = 0; val < dom; ++val) {
-            FactProxy f = var.get_fact(val);
-            g_py_fact_names[var_id].emplace_back(py::str(f.get_name()));
-        }
-    }
-
-    g_py_tables_ready = true;
-
-    if (g_debug) {
-        utils::g_log << "[AntPlan] Built Python string tables for "
-                     << num_vars << " variables.\n";
-    }
-}
-
-static inline double py_scalar_to_double(py::object obj) {
-    if (py::hasattr(obj, "item")) {
-        obj = obj.attr("item")();
-    }
-    return obj.cast<double>();
-}
-
-// ===== ctor / dtor =====
-AntPlanHeuristic::AntPlanHeuristic(const options::Options &opts)
-    : AdditiveHeuristic(opts),
-      exploration_frequency(10),
-      exploration_depth(2),
-      improvement_threshold(0.9),
-      exploration_budget(20),
-      relaxed_plan(task_proxy.get_operators().size(), false) {
-
-    std::string func_name = opts.get<std::string>("function");
-    std::string mod_name = opts.get<std::string>("module");
-
-    py_func_name = func_name;
-    py_module_name = mod_name;
-    py_ready = false;
-
-    // Get exploration parameters
-    exploration_frequency = opts.get<int>("exploration_frequency");
-    exploration_depth = opts.get<int>("exploration_depth");
-    improvement_threshold = opts.get<double>("improvement_threshold");
-    exploration_budget = opts.get<int>("exploration_budget");
-
-    utils::g_log << "[AntPlan] ctor: function=" << py_func_name
-                 << " module=" << (py_module_name.empty() ? "<none>" : py_module_name)
-                 << "\n[AntPlan] Exploration: freq=" << exploration_frequency
-                 << " depth=" << exploration_depth
-                 << " threshold=" << improvement_threshold
-                 << " budget=" << exploration_budget
-                 << std::endl;
-
-    ensure_python_ready();
-    ensure_py_tables_ready(task_proxy);
-}
-
-AntPlanHeuristic::~AntPlanHeuristic() {
-    if (g_debug) {
-        utils::g_log << "[AntPlan] Stats: "
-                     << "total_calls=" << g_calls
-                     << " cache_hits=" << g_cache_hits
-                     << " cache_misses=" << g_cache_misses
-                     << " explorations=" << exploration_count
-                     << std::endl;
-    }
-}
-
-// ===== Python init =====
-void AntPlanHeuristic::ensure_python_ready() {
-    if (py_ready)
-        return;
-
-    if (!Py_IsInitialized()) {
-        py::initialize_interpreter();
-    }
-
-    py::gil_scoped_acquire gil;
-
-    try {
-        if (py_module_name.empty())
-            throw std::runtime_error("No Python module provided for AntPlan.");
-
-        py::module sys = py::module::import("sys");
-        py::list p = sys.attr("path");
-        bool has_dot = false;
-        for (auto item : p) {
-            if (py::cast<std::string>(item) == ".") {
-                has_dot = true;
-                break;
-            }
-        }
-        if (!has_dot) {
-            sys.attr("path").attr("insert")(0, ".");
-        }
-
-        py::object mdl = py::module::import(py_module_name.c_str());
-
-        if (!py::hasattr(mdl, py_func_name.c_str())) {
-            throw std::runtime_error(
-                "Python object '" + py_func_name + "' not found in module '" + py_module_name + "'");
-        }
-
-        py_cost_fn = mdl.attr(py_func_name.c_str());
-        py_ready = true;
-
-        if (g_debug) {
-            utils::g_log << "[AntPlan] Python ready.\n";
-        }
-    } catch (const std::exception &e) {
-        py_ready = false;
-        utils::g_log << "[AntPlan] Failed to initialize Python: " << e.what() << std::endl;
-        throw;
-    }
-}
-
-// ===== preferred operators helper =====
 void AntPlanHeuristic::mark_preferred_operators_and_relaxed_plan(
-    const State &state, PropID goal_id) {
+        const State &state, PropID goal_id) {
     Proposition *goal = get_proposition(goal_id);
-    if (!goal->marked) {
-        goal->marked = true;
-        OpID op_id = goal->reached_by;
-        if (op_id != NO_OP) {
-            UnaryOperator *unary_op = get_operator(op_id);
-            bool is_preferred = true;
-            for (PropID precond : get_preconditions(op_id)) {
-                mark_preferred_operators_and_relaxed_plan(state, precond);
-                if (get_proposition(precond)->reached_by != NO_OP) {
-                    is_preferred = false;
-                }
-            }
-            int operator_no = unary_op->operator_no;
-            if (operator_no != -1) {
-                relaxed_plan[operator_no] = true;
-                if (is_preferred) {
-                    OperatorProxy op = task_proxy.get_operators()[operator_no];
-                    assert(task_properties::is_applicable(op, state));
-                    set_preferred(op);
-                }
-            }
-        }
-    }
-}
-
-// ===== Exploration methods =====
-bool AntPlanHeuristic::should_explore_now() {
-    // CRITICAL FIX: Always explore at initial state (evals 0, 1, 2)
-    // This ensures we explore when all operators are available
-    if (evaluation_count <= 2) {
-        if (g_debug) {
-            utils::g_log << "[AntPlan] Forcing exploration at early eval " 
-                        << evaluation_count << " (initial states)\n";
-        }
-        return true;
-    }
-    
-    // Continue with normal schedule
-    if (evaluation_count < 100) {
-        return (evaluation_count % 5 == 0);
-    } else if (evaluation_count < 500) {
-        return (evaluation_count % exploration_frequency == 0);
-    } else {
-        return (evaluation_count % (exploration_frequency * 2) == 0);
-    }
-}
-
-double AntPlanHeuristic::evaluate_state_with_nn(const State &state) {
-    py::gil_scoped_acquire gil;
-
-    int num_vars = task_proxy.get_variables().size();
-    py::dict d;
-
-    for (int var_id = 0; var_id < num_vars; ++var_id) {
-        FactProxy fact = state[var_id];
-        d[g_py_var_names[var_id]] = g_py_fact_names[var_id][fact.get_value()];
-    }
-
-    py::object res = py_cost_fn(d);
-    return py_scalar_to_double(res);
-}
-
-void AntPlanHeuristic::probe_successors(const State &state, double current_cost,
-                                        int depth, int &budget) {
-    if (depth == 0 || budget <= 0) return;
-
-    uint64_t state_hash = hash_state_values(task_proxy, state);
-    if (explored_states.count(state_hash)) {
-        if (g_debug) {
-            utils::g_log << "[AntPlan]   State already explored (skipping)\n";
-        }
+    if (goal->marked)
         return;
-    }
-    explored_states.insert(state_hash);
 
-    // Periodically clear explored_states to avoid memory growth
-    if (explored_states.size() > 10000) {
-        explored_states.clear();
-    }
+    goal->marked = true;
+    OpID op_id = goal->reached_by;
+    if (op_id == NO_OP)
+        return;
 
-    py::gil_scoped_acquire gil;
-
-    std::vector<std::pair<OperatorProxy, double>> promising_ops;
-    int applicable_count = 0;
-    int improved_count = 0;
-    double threshold = current_cost * improvement_threshold;
-
-    if (g_debug) {
-        utils::g_log << "[AntPlan]   Probing at depth " << (exploration_depth - depth) 
-                    << ", current cost: " << current_cost 
-                    << ", improvement threshold: " << threshold 
-                    << " (need < " << threshold << " to improve)\n";
+    UnaryOperator *unary_op = get_operator(op_id);
+    bool is_preferred = true;
+    for (PropID precond : get_preconditions(op_id)) {
+        mark_preferred_operators_and_relaxed_plan(state, precond);
+        if (get_proposition(precond)->reached_by != NO_OP)
+            is_preferred = false;
     }
 
-    // Count total operators first for better debugging
-    int total_ops = task_proxy.get_operators().size();
-    
-    for (OperatorProxy op : task_proxy.get_operators()) {
-        if (!task_properties::is_applicable(op, state)) continue;
-        
-        applicable_count++;
-        if (budget <= 0) {
-            if (g_debug) {
-                utils::g_log << "[AntPlan]   Budget exhausted after checking " 
-                            << applicable_count << " applicable operators (out of " 
-                            << total_ops << " total)\n";
-            }
-            break;
-        }
-        --budget;
-
-        State succ = state.get_unregistered_successor(op);
-        double succ_cost = evaluate_state_with_nn(succ);
-
-        bool improved = (succ_cost < threshold);
-        
-        if (g_debug) {
-            utils::g_log << "[AntPlan]   [" << applicable_count << "] " 
-                        << op.get_name() 
-                        << " -> cost=" << succ_cost;
-            if (improved) {
-                utils::g_log << " ✓ IMPROVED by " << (current_cost - succ_cost) 
-                            << " (new=" << succ_cost << " < threshold=" << threshold << ")\n";
-            } else {
-                utils::g_log << " ✗ no improvement (new=" << succ_cost 
-                            << " >= threshold=" << threshold << ")\n";
-            }
-        }
-
-        if (improved) {
-            promising_ops.push_back({op, succ_cost});
-            improved_count++;
-        }
-    }
-
-    if (g_debug) {
-        utils::g_log << "[AntPlan]   === Summary: " << applicable_count 
-                    << " applicable ops (out of " << total_ops << " total), "
-                    << improved_count << " improved, " 
-                    << promising_ops.size() << " promising ===\n";
-    }
-
-    // Sort by cost (best first)
-    std::sort(promising_ops.begin(), promising_ops.end(),
-              [](const std::pair<OperatorProxy, double> &a, 
-                 const std::pair<OperatorProxy, double> &b) { 
-                  return a.second < b.second; 
-              });
-
-    // Mark all as preferred
-    for (size_t i = 0; i < promising_ops.size(); ++i) {
-        set_preferred(promising_ops[i].first);
-
-        if (g_debug) {
-            utils::g_log << "[AntPlan] >>> Depth " << (exploration_depth - depth)
-                        << ": PREFERRING #" << (i+1) << " " 
-                        << promising_ops[i].first.get_name()
-                        << " (cost improvement: " << current_cost << " -> " 
-                        << promising_ops[i].second << ", delta=" 
-                        << (current_cost - promising_ops[i].second) << ")\n";
-        }
-    }
-
-    // Recursively explore from top 2 promising successors
-    if (depth > 1) {
-        for (size_t i = 0; i < std::min(size_t(2), promising_ops.size()); ++i) {
-            if (budget <= 0) {
-                if (g_debug) {
-                    utils::g_log << "[AntPlan]   Budget exhausted, stopping recursive exploration\n";
-                }
-                break;
-            }
-
-            if (g_debug) {
-                utils::g_log << "[AntPlan]   Recursively exploring from " 
-                            << promising_ops[i].first.get_name() << "\n";
-            }
-
-            State succ = state.get_unregistered_successor(promising_ops[i].first);
-            probe_successors(succ, promising_ops[i].second, depth - 1, budget);
+    int op_no = unary_op->operator_no;
+    if (op_no != -1) {
+        relaxed_plan_[op_no] = true;
+        if (is_preferred) {
+            OperatorProxy op = task_proxy.get_operators()[op_no];
+            assert(task_properties::is_applicable(op, state));
+            set_preferred(op);
         }
     }
 }
 
-void AntPlanHeuristic::explore_from_state(const State &state, double current_cost) {
-    ++exploration_count;
 
-    int budget = exploration_budget;
+// ===================================================================
+//  Main heuristic computation
+// ===================================================================
 
-    if (g_debug) {
-        utils::g_log << "[AntPlan] ======================================\n";
-        utils::g_log << "[AntPlan] === Exploration #" << exploration_count
-                    << " at eval " << evaluation_count << " ===\n";
-        utils::g_log << "[AntPlan] === Budget: " << budget 
-                    << ", Depth: " << exploration_depth 
-                    << ", Threshold: " << improvement_threshold << " ===\n";
-        utils::g_log << "[AntPlan] ======================================\n";
-    }
-
-    probe_successors(state, current_cost, exploration_depth, budget);
-
-    if (g_debug) {
-        utils::g_log << "[AntPlan] ======================================\n";
-        utils::g_log << "[AntPlan] === Exploration #" << exploration_count << " complete ===\n";
-        utils::g_log << "[AntPlan] === Used " << (exploration_budget - budget)
-                    << "/" << exploration_budget << " budget ===\n";
-        utils::g_log << "[AntPlan] ======================================\n";
-    }
-}
-
-// ===== main computation =====
 int AntPlanHeuristic::compute_heuristic(const State &ancestor_state) {
-    ++g_calls;
-    ++evaluation_count;
+    ++stat_calls_;
 
     State state = convert_ancestor_state(ancestor_state);
 
-    if (g_use_cache) {
-        uint64_t key = hash_state_values(task_proxy, state);
-        auto it = g_cache.find(key);
-        if (it != g_cache.end()) {
-            ++g_cache_hits;
+    // ---- cache lookup ----
+    uint64_t key = 0;
+    if (use_cache_) {
+        key = hash_state(state);
+        auto it = cache_.find(key);
+        if (it != cache_.end()) {
+            ++stat_cache_hits_;
             return it->second;
         }
-        ++g_cache_misses;
+        ++stat_cache_miss_;
     }
 
-    if (!py_ready) {
-        throw std::runtime_error("[AntPlan] Python not ready in compute_heuristic.");
-    }
+    if (!py_ready_)
+        throw runtime_error("[AntPlan] Python not ready in compute_heuristic.");
 
-    int anticipatory_cost_int = 0;
-
+    // ---- call Python ----
+    int h = 0;
     try {
         py::gil_scoped_acquire gil;
-        ensure_py_tables_ready(task_proxy);
+        ensure_tables(task_proxy);
 
+        int n = task_proxy.get_variables().size();
         py::dict d;
-        int num_vars = task_proxy.get_variables().size();
-        for (int var_id = 0; var_id < num_vars; ++var_id) {
-            FactProxy fact = state[var_id];
-            d[g_py_var_names[var_id]] = g_py_fact_names[var_id][fact.get_value()];
+        for (int v = 0; v < n; ++v)
+            d[var_names_[v]] = fact_names_[v][state[v].get_value()];
+
+        double raw = py_to_double(py_cost_fn_(d));
+        h = float_to_heuristic(raw);
+
+        if (log_states_) {
+            utils::g_log << "[AntPlan] raw=" << raw
+                         << "  h=" << h << "\n";
+            for (int v = 0; v < n; ++v)
+                utils::g_log << "  " << task_proxy.get_variables()[v].get_name()
+                             << " = " << state[v].get_name() << "\n";
         }
 
-        py::object res = py_cost_fn(d);
-        double anticipatory_cost = py_scalar_to_double(res);
-
-        if (std::isnan(anticipatory_cost) || std::isinf(anticipatory_cost)) {
-            anticipatory_cost_int = 0;
-        } else {
-           // Pick these once and keep them fixed:
-            constexpr double SCALE = 10.0;   // keeps decimals meaningful
-            constexpr double SHIFT = 10.0;   // ensures typical negatives don't collapse to 0
-
-            double mapped = SCALE * anticipatory_cost + SHIFT;
-
-            int h;
-            if (std::isnan(mapped) || std::isinf(mapped)) {
-                h = 0;
-            } else {
-                h = static_cast<int>(std::lround(mapped));
-                if (h < 0) h = 0;
-            }
-            anticipatory_cost_int = h;
-        }
-
-    } catch (const std::exception &e) {
-        if (g_debug) {
+    } catch (const exception &e) {
+        if (debug_) {
             try {
                 py::gil_scoped_acquire gil2;
-                py::object tb = py::module::import("traceback").attr("format_exc")();
-                utils::g_log << "[AntPlan] Python function failed: " << e.what() << "\n"
-                             << py::cast<std::string>(tb) << std::endl;
+                string tb = py::cast<string>(
+                    py::module_::import("traceback").attr("format_exc")());
+                utils::g_log << "[AntPlan] Python error: " << e.what()
+                             << "\n" << tb << endl;
             } catch (...) {
-                utils::g_log << "[AntPlan] Python function failed: " << e.what() << std::endl;
+                utils::g_log << "[AntPlan] Python error: "
+                             << e.what() << endl;
             }
         }
-        anticipatory_cost_int = 0;
+        h = 0;
     }
 
-    if (g_log_states) {
-        utils::g_log << "[AntPlan] State facts:\n";
-        int num_vars = task_proxy.get_variables().size();
-        for (int var_id = 0; var_id < num_vars; ++var_id) {
-            VariableProxy var = task_proxy.get_variables()[var_id];
-            FactProxy fact = state[var_id];
-            utils::g_log << "  " << var.get_name() << " = " << fact.get_name() << "\n";
-        }
-        utils::g_log << "[AntPlan] anticipatory_cost_int=" << anticipatory_cost_int << "\n";
-    }
-
-    // === EXPLORATION ===
-    if (should_explore_now()) {
-        explore_from_state(state, anticipatory_cost_int);
-    }
-
-    if (g_use_cache) {
-        uint64_t key = hash_state_values(task_proxy, state);
+    // ---- cache store ----
+    if (use_cache_) {
         maybe_evict_cache();
-        g_cache[key] = anticipatory_cost_int;
+        cache_[key] = h;
     }
 
-    return anticipatory_cost_int;
+    return h;
 }
 
-// ===== plugin registration =====
-static std::shared_ptr<Heuristic> _parse(OptionParser &parser) {
+
+// ===================================================================
+//  Plugin registration
+// ===================================================================
+
+static shared_ptr<Heuristic> _parse(OptionParser &parser) {
     parser.document_synopsis(
         "AntPlan heuristic",
-        "Evaluates a state with a Python cost function (anticipatory cost) and explores promising branches.");
+        "Evaluates states via a Python cost function.  Raw float values "
+        "are converted to non-negative integers with:  "
+        "h = clamp(round(raw * scale) + offset, 0, 100000000).");
 
-    parser.add_option<std::string>(
+    // ---- Python binding ----
+    parser.add_option<string>(
         "function",
-        "Python function name to call (attribute in module).",
+        "Python function name (attribute in module).",
         "anticipatory_cost_fn");
-
-    parser.add_option<std::string>(
+    parser.add_option<string>(
         "module",
-        "Python module name to import (e.g., 'pkg.subpkg.module').",
+        "Python module to import (dotted path).",
         "antplan.scripts.eval_antplan_gripper");
 
-    // Performance/debug knobs
+    // ---- float -> int conversion ----
+    parser.add_option<double>(
+        "scale",
+        "Multiplier applied to the raw Python float before rounding.  "
+        "Larger values preserve more decimal precision.",
+        "10000.0");
+    parser.add_option<int>(
+        "offset",
+        "Constant added after scaling to shift negative values into the "
+        "non-negative range.  Choose a value larger than the expected "
+        "|min_cost| * scale.",
+        "100000");
+
+    // ---- performance / debug ----
     parser.add_option<bool>(
         "debug",
-        "Print tracebacks/diagnostics on Python failure (slow).",
+        "Print diagnostics and final statistics.",
         "false");
     parser.add_option<bool>(
         "log_states",
-        "Log full state facts for every heuristic call (VERY slow).",
+        "Log every state and its raw/converted h value (very slow).",
         "false");
     parser.add_option<bool>(
         "cache",
@@ -548,62 +373,17 @@ static std::shared_ptr<Heuristic> _parse(OptionParser &parser) {
         "true");
     parser.add_option<int>(
         "cache_max_entries",
-        "Max entries before cache is cleared (simple eviction).",
+        "Max cache entries before full eviction.",
         "500000");
-
-    // Exploration parameters
-    parser.add_option<int>(
-        "exploration_frequency",
-        "Explore every N state evaluations (lower = more exploration).",
-        "10");
-    parser.add_option<int>(
-        "exploration_depth",
-        "How many actions to look ahead during exploration.",
-        "2");
-    parser.add_option<double>(
-        "improvement_threshold",
-        "State is 'good' if cost < current * threshold (0.9 = 10% improvement).",
-        "0.9");
-    parser.add_option<int>(
-        "exploration_budget",
-        "Max successor evaluations per exploration (prevents explosion).",
-        "20");
 
     Heuristic::add_options_to_parser(parser);
     Options opts = parser.parse();
     if (parser.dry_run())
         return nullptr;
 
-    g_debug = opts.get<bool>("debug");
-    g_log_states = opts.get<bool>("log_states");
-    g_use_cache = opts.get<bool>("cache");
-    g_cache_max_entries = static_cast<size_t>(std::max(0, opts.get<int>("cache_max_entries")));
-
-    return std::make_shared<AntPlanHeuristic>(opts);
+    return make_shared<AntPlanHeuristic>(opts);
 }
 
 static Plugin<Evaluator> _plugin("antplan", _parse);
 
-} // namespace antplan_heuristic
-// ```
-
-// ---
-
-// ## **Key Changes:**
-
-// 1. **Lines 233-242**: Modified `should_explore_now()` to **always return true for evaluations 0, 1, 2** (initial states)
-// 2. This forces exploration when obj5 is still on the table and all actions (pick, move to sink, wash, etc.) are available
-
-// ---
-
-// ## **What to Expect in Output:**
-// ```
-// [AntPlan] Forcing exploration at early eval 0 (initial states)
-// [AntPlan] ======================================
-// [AntPlan] === Exploration #1 at eval 0 ===
-// [AntPlan]   Probing at depth 0, current cost: 282, improvement threshold: 267.9
-// [AntPlan]   [1] movepick obj5 bp_obj5_table0 -> cost=278
-// [AntPlan]   [2] movepick obj5 bp_obj5_sink -> cost=250  ✓ IMPROVED
-// [AntPlan]   [3] wash obj5 -> cost=150  ✓ IMPROVED
-// [AntPlan]   === Summary: 10 applicable ops (out of 17 total), 5 improved, 5 promising ===
-// [AntPlan] >>> PREFERRING wash obj5 (cost: 282 -> 150)
+}  // namespace antplan_heuristic
